@@ -216,12 +216,46 @@ func (s *Store) List(ctx context.Context) ([]domain.Workflow, error) {
 	}
 	return out, rows.Err()
 }
+
+const workflowSchedulerLock int64 = 0x6169776600000001
+
 func (s *Store) Claim(ctx context.Context, owner string) (domain.Workflow, error) {
+	return s.ClaimWithLimit(ctx, owner, 2)
+}
+
+// ClaimWithLimit claims one workflow while enforcing a global concurrency
+// ceiling across control processes. Only valid leases on runnable automatic
+// phases count; maintainer-waiting and other human-owned states never occupy a
+// slot.
+func (s *Store) ClaimWithLimit(ctx context.Context, owner string, maxActive int) (domain.Workflow, error) {
+	if maxActive < 1 || maxActive > 4 {
+		return domain.Workflow{}, errors.New("workflow concurrency must be between 1 and 4")
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return domain.Workflow{}, err
 	}
 	defer tx.Rollback(ctx)
+
+	// Serialize slot checks across all control processes. The row-level
+	// candidate lock below and the per-workflow lease remain the work fence.
+	var locked bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, workflowSchedulerLock).Scan(&locked); err != nil {
+		return domain.Workflow{}, err
+	}
+	if !locked {
+		return domain.Workflow{}, pgx.ErrNoRows
+	}
+	var active int
+	err = tx.QueryRow(ctx, `SELECT count(*) FROM workflows
+WHERE lease_owner<>'' AND lease_until>now() AND control='ACTIVE'
+  AND phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')`).Scan(&active)
+	if err != nil {
+		return domain.Workflow{}, err
+	}
+	if active >= maxActive {
+		return domain.Workflow{}, pgx.ErrNoRows
+	}
 
 	var id string
 	var repositoryID int64
@@ -231,39 +265,11 @@ WHERE w.control='ACTIVE'
   AND w.phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')
   AND (w.lease_until IS NULL OR w.lease_until<now())
   AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.workflow_id=w.id AND o.kind IN('publish','gate','ready') AND o.state IN('pending','running','unknown','retry_wait'))
-  AND NOT EXISTS(SELECT 1 FROM workflows other WHERE other.repository_id=w.repository_id AND other.id<>w.id
-    AND (other.lease_until>now()
-      OR (other.phase='AWAITING_MAINTAINER' AND other.control NOT IN('CANCELLED','CANCELLING','COMPLETED'))))
 ORDER BY w.updated_at
 FOR UPDATE OF w SKIP LOCKED
 LIMIT 1`).Scan(&id, &repositoryID)
 	if err != nil {
 		return domain.Workflow{}, err
-	}
-
-	var locked bool
-	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, repositoryID).Scan(&locked); err != nil {
-		return domain.Workflow{}, err
-	}
-	if !locked {
-		return domain.Workflow{}, pgx.ErrNoRows
-	}
-
-	// This statement gets a fresh READ COMMITTED snapshot after the advisory
-	// lock, so it also observes claims committed by another scheduler process
-	// while this transaction was choosing its candidate.
-	var blocked bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(
-  SELECT 1 FROM workflows other
-  WHERE other.repository_id=$1 AND other.id<>$2
-    AND (other.lease_until>now()
-      OR (other.phase='AWAITING_MAINTAINER' AND other.control NOT IN('CANCELLED','CANCELLING','COMPLETED')))
-)`, repositoryID, id).Scan(&blocked)
-	if err != nil {
-		return domain.Workflow{}, err
-	}
-	if blocked {
-		return domain.Workflow{}, pgx.ErrNoRows
 	}
 
 	tag, err := tx.Exec(ctx, `UPDATE workflows SET lease_owner=$2,lease_until=now()+interval '90 seconds'
@@ -282,7 +288,7 @@ WHERE id=$1 AND repository_id=$3 AND control='ACTIVE'
 	return s.Get(ctx, id)
 }
 func (s *Store) Renew(ctx context.Context, w domain.Workflow) error {
-	tag, e := s.DB.Exec(ctx, "UPDATE workflows SET lease_until=now()+interval '90 seconds' WHERE id=$1 AND lease_owner=$2 AND generation=$3 AND control='ACTIVE'", w.ID, w.LeaseOwner, w.Generation)
+	tag, e := s.DB.Exec(ctx, "UPDATE workflows SET lease_until=now()+interval '90 seconds' WHERE id=$1 AND lease_owner=$2 AND generation=$3 AND control='ACTIVE' AND lease_until>now()", w.ID, w.LeaseOwner, w.Generation)
 	if e != nil {
 		return e
 	}

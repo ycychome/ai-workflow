@@ -334,7 +334,12 @@ func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load workflows")
 		return
 	}
-	scheduling, err := h.engine.Store.SchedulingFor(ctx, workflows)
+	cfg := h.engine.Config()
+	workflowLimit := cfg.Runner.WorkflowConcurrency
+	if workflowLimit == 0 {
+		workflowLimit = 2
+	}
+	scheduling, err := h.engine.Store.SchedulingFor(ctx, workflows, workflowLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load workflow scheduling metadata")
 		return
@@ -347,7 +352,6 @@ func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, workflowStateView{Workflow: wf, Scheduling: scheduling[wf.ID]})
 	}
-	cfg := h.engine.Config()
 	writeJSON(w, http.StatusOK, map[string]any{"workflows": views, "health": h.basicHealth(ctx, cfg), "config": publicConfig(cfg), "generation": maxGeneration})
 }
 
@@ -387,7 +391,7 @@ func publicConfig(cfg config.Config) map[string]any {
 	return map[string]any{
 		"github":       map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL, "configured": cfg.GitHub.AppID > 0},
 		"model":        map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "attempt_minutes": cfg.Runner.AttemptMinutes},
+		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "attempt_minutes": cfg.Runner.AttemptMinutes},
 		"budget":       map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		"repositories": repos,
 	}
@@ -406,10 +410,11 @@ type settingsUpdate struct {
 		Token           string  `json:"token"`
 	} `json:"model"`
 	Runner struct {
-		Mode           *string `json:"mode"`
-		Builders       *int    `json:"builders"`
-		Reviewers      *int    `json:"reviewers"`
-		AttemptMinutes *int    `json:"attempt_minutes"`
+		Mode                *string `json:"mode"`
+		Builders            *int    `json:"builders"`
+		Reviewers           *int    `json:"reviewers"`
+		WorkflowConcurrency *int    `json:"workflow_concurrency"`
+		AttemptMinutes      *int    `json:"attempt_minutes"`
 	} `json:"runner"`
 	Budget struct {
 		IssueCalls   *int     `json:"issue_calls"`
@@ -429,7 +434,7 @@ func (h *Handlers) settings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"github": map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL},
 			"model":  map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "attempt_minutes": cfg.Runner.AttemptMinutes},
+			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "attempt_minutes": cfg.Runner.AttemptMinutes},
 			"budget": map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		})
 	case http.MethodPost:
@@ -485,6 +490,9 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if update.Runner.Reviewers != nil {
 		cfg.Runner.Reviewers = *update.Runner.Reviewers
 	}
+	if update.Runner.WorkflowConcurrency != nil {
+		cfg.Runner.WorkflowConcurrency = *update.Runner.WorkflowConcurrency
+	}
 	if update.Runner.AttemptMinutes != nil {
 		cfg.Runner.AttemptMinutes = *update.Runner.AttemptMinutes
 	}
@@ -510,7 +518,7 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.Budget.OutputPrice = *update.Budget.OutputPrice
 	}
 	if !validSettings(cfg) {
-		writeError(w, http.StatusBadRequest, "invalid settings: mode must be fake or responses; builders/reviewers 1–2; budget and output limits must be valid")
+		writeError(w, http.StatusBadRequest, "invalid settings: mode must be fake or responses; builders/reviewers 1–2; workflow concurrency 1–4; budget and output limits must be valid")
 		return
 	}
 	if strings.TrimSpace(update.Model.Token) != "" {
@@ -538,7 +546,7 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func validSettings(cfg config.Config) bool {
-	if !((cfg.Runner.Mode == "fake" || cfg.Runner.Mode == "responses") && cfg.Runner.Builders >= 1 && cfg.Runner.Builders <= 2 && cfg.Runner.Reviewers >= 1 && cfg.Runner.Reviewers <= 2 && cfg.Runner.AttemptMinutes >= 1 && cfg.Budget.IssueCalls >= 1 && cfg.Budget.DailyCalls >= 1 && cfg.Budget.IssueMinutes >= 1 && cfg.Budget.MaxAttempts >= 1 && cfg.Budget.MaxFixRounds >= 0 && cfg.Model.MaxOutputTokens >= 1 && cfg.Budget.InputPrice >= 0 && cfg.Budget.OutputPrice >= 0 && !math.IsNaN(cfg.Budget.InputPrice) && !math.IsNaN(cfg.Budget.OutputPrice) && !math.IsInf(cfg.Budget.InputPrice, 0) && !math.IsInf(cfg.Budget.OutputPrice, 0)) {
+	if !((cfg.Runner.Mode == "fake" || cfg.Runner.Mode == "responses") && cfg.Runner.Builders >= 1 && cfg.Runner.Builders <= 2 && cfg.Runner.Reviewers >= 1 && cfg.Runner.Reviewers <= 2 && config.ValidWorkflowConcurrency(cfg.Runner.WorkflowConcurrency) && cfg.Runner.AttemptMinutes >= 1 && cfg.Budget.IssueCalls >= 1 && cfg.Budget.DailyCalls >= 1 && cfg.Budget.IssueMinutes >= 1 && cfg.Budget.MaxAttempts >= 1 && cfg.Budget.MaxFixRounds >= 0 && cfg.Model.MaxOutputTokens >= 1 && cfg.Budget.InputPrice >= 0 && cfg.Budget.OutputPrice >= 0 && !math.IsNaN(cfg.Budget.InputPrice) && !math.IsNaN(cfg.Budget.OutputPrice) && !math.IsInf(cfg.Budget.InputPrice, 0) && !math.IsInf(cfg.Budget.OutputPrice, 0)) {
 		return false
 	}
 	if cfg.Model.BaseURL == "" {

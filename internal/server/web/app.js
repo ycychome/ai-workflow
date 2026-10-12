@@ -1128,7 +1128,7 @@
     }
     if (form.elements.stream) form.elements.stream.checked = Boolean(model.stream);
     if (form.elements.mode && runner.mode) form.elements.mode.value = runner.mode;
-    for (const name of ["builders", "reviewers", "attempt_minutes"]) {
+    for (const name of ["workflow_concurrency", "builders", "reviewers", "attempt_minutes"]) {
       if (form.elements[name] && runner[name] !== undefined) form.elements[name].value = runner[name];
     }
     for (const name of ["issue_calls", "daily_calls", "issue_minutes", "max_attempts", "max_fix_rounds"]) {
@@ -1186,6 +1186,8 @@
     const submit = $("#save-settings");
     message.textContent = "";
     try {
+      const workflowConcurrency = formNumber(form, "workflow_concurrency");
+      if (workflowConcurrency < 1 || workflowConcurrency > 4) throw new Error("“并行工作流数”必须在 1 到 4 之间。");
       const payload = {
         model: {
           base_url: form.elements.base_url.value.trim(),
@@ -1196,6 +1198,7 @@
         },
         runner: {
           mode: form.elements.mode.value,
+          workflow_concurrency: workflowConcurrency,
           builders: formNumber(form, "builders"),
           reviewers: formNumber(form, "reviewers"),
           attempt_minutes: formNumber(form, "attempt_minutes")

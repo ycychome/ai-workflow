@@ -30,11 +30,12 @@ type Config struct {
 		MaxOutputTokens int    `yaml:"max_output_tokens"`
 	} `yaml:"model"`
 	Runner struct {
-		Mode           string `yaml:"mode"`
-		Image          string `yaml:"image"`
-		Builders       int    `yaml:"builders"`
-		Reviewers      int    `yaml:"reviewers"`
-		AttemptMinutes int    `yaml:"attempt_minutes"`
+		Mode                string `yaml:"mode"`
+		Image               string `yaml:"image"`
+		Builders            int    `yaml:"builders"`
+		Reviewers           int    `yaml:"reviewers"`
+		WorkflowConcurrency int    `yaml:"workflow_concurrency"`
+		AttemptMinutes      int    `yaml:"attempt_minutes"`
 	} `yaml:"runner"`
 	Budget struct {
 		IssueCalls   int     `yaml:"issue_calls"`
@@ -64,6 +65,7 @@ func Load(path string) (Config, error) {
 	c.Runner.Image = "ai-workflow-runner:local"
 	c.Runner.Builders = 2
 	c.Runner.Reviewers = 2
+	c.Runner.WorkflowConcurrency = 2
 	c.Runner.AttemptMinutes = 30
 	c.Model.Stream = true
 	c.Model.MaxOutputTokens = 8192
@@ -93,6 +95,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.Runner.Builders < 1 || c.Runner.Builders > 2 || c.Runner.Reviewers < 1 || c.Runner.Reviewers > 2 {
 		return c, errors.New("MVP allows 1 or 2 builders/reviewers")
+	}
+	if !ValidWorkflowConcurrency(c.Runner.WorkflowConcurrency) {
+		return c, errors.New("runner.workflow_concurrency must be between 1 and 4")
 	}
 	if c.Runner.Mode != "fake" && c.Runner.Mode != "responses" {
 		return c, errors.New("runner.mode must be responses or fake")
@@ -128,6 +133,8 @@ func Load(path string) (Config, error) {
 	}
 	return c, nil
 }
+
+func ValidWorkflowConcurrency(n int) bool { return n >= 1 && n <= 4 }
 func (c Config) Repository(name string) (Repository, bool) {
 	for _, r := range c.Repositories {
 		if r.Name == name {

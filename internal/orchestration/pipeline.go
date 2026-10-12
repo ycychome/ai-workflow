@@ -326,6 +326,12 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 	task := w.Tasks[idx]
 	kind := taskKind(task)
 	res = buildResult{index: idx}
+	release, slotErr := e.builderSlots.acquire(ctx, func() int { return e.Config().Runner.Builders })
+	if slotErr != nil {
+		res.err = slotErr
+		return res
+	}
+	defer release()
 	id := fmt.Sprintf("%s-g%d-%s-e%d", w.ID, w.Generation, task.ID, task.LeaseEpoch)
 	ctx, cancel := context.WithTimeout(ctx, e.Config().AttemptTimeout())
 	defer cancel()
@@ -788,6 +794,11 @@ type reviewReport struct {
 }
 
 func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.Task, files map[string]sandbox.File, skeptic bool) (report reviewReport, ev []domain.Evidence, retErr error) {
+	release, slotErr := e.reviewerSlots.acquire(ctx, func() int { return e.Config().Runner.Reviewers })
+	if slotErr != nil {
+		return reviewReport{}, nil, slotErr
+	}
+	defer release()
 	id := fmt.Sprintf("%s-g%d-%s-e%d", w.ID, w.Generation, task.ID, task.LeaseEpoch)
 	ctx, cancel := context.WithTimeout(ctx, e.Config().AttemptTimeout())
 	defer cancel()

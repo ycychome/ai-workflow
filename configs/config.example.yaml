@@ -20,6 +20,7 @@ runner:
   image: ai-workflow-runner:local
   builders: 2
   reviewers: 2
+  workflow_concurrency: 2 # 1-4; human waiting phases do not occupy a slot
   attempt_minutes: 30
 budget:
   issue_calls: 80

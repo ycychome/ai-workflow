@@ -105,13 +105,19 @@ gate publishes a check for the current candidate but never merges it. A
 Maintainer must inspect the pull request and merge through GitHub's normal
 interface.
 
-The current MVP reserves one workflow lane per repository through
-`AWAITING_MAINTAINER`. A later accepted Issue can remain in TRIAGE with zero model
-calls while the prior PR awaits a human decision. Dashboard scheduling metadata
-distinguishes this queued state from a leased execution and identifies the
-blocking workflow. Complete or cancel the earlier workflow to release the lane;
-pausing it does not release an awaiting-maintainer lane. Queue observation does
-not change authorization, the workflow generation, or the merge gate.
+Configure **Concurrent workflows** in Settings → Budget and execution (1–4,
+default 2). Only workflows with a valid execution lease in an automatic processing
+phase consume this capacity. Waiting for requirement clarification, specification
+approval, or Maintainer merge does not consume a slot. Each Issue has its own
+branch, PR, sandbox, verification identity and evidence. Lowering the limit lets
+current tasks finish and delays new admissions until usage drops below the limit.
+Builder/reviewer settings bound the role pools across concurrent workflows.
+
+Dashboard scheduling metadata distinguishes queued work from leased execution.
+A passing PR stays available for human review while another Issue can run. When
+a merge changes the target branch, affected candidates must be reverified using
+the new base/head identity; paused and human-owned workflows remain under their
+existing control state. Workflow concurrency never enables automatic merge.
 
 ## Backup, restore, and shutdown
 

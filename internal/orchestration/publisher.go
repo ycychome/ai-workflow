@@ -666,7 +666,6 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 			if unfinishedDevelopment(x.Tasks) {
 				x.Phase = "DEVELOPING"
 			}
-			x.Control = "ACTIVE"
 			x.Review.Verdict = "OBSOLETE"
 			return []store.Action{gateAction(*x, false, "base branch changed; verification is stale"), statusAction(*x)}, nil
 		}

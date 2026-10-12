@@ -21,14 +21,16 @@ import (
 )
 
 type Engine struct {
-	Store     *store.Store
-	Sandbox   *sandbox.Manager
-	mu        sync.RWMutex
-	snapshots sourceSnapshotCache
-	cfg       config.Config
-	app       *gh.Client
-	active    map[string]context.CancelFunc
-	owner     string
+	Store         *store.Store
+	Sandbox       *sandbox.Manager
+	mu            sync.RWMutex
+	snapshots     sourceSnapshotCache
+	builderSlots  roleLimiter
+	reviewerSlots roleLimiter
+	cfg           config.Config
+	app           *gh.Client
+	active        map[string]context.CancelFunc
+	owner         string
 }
 
 func New(s *store.Store, c config.Config) (*Engine, error) {
@@ -150,7 +152,11 @@ func (e *Engine) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			e.settleControls(ctx)
-			w, err := e.Store.Claim(ctx, e.owner)
+			workflowLimit := e.Config().Runner.WorkflowConcurrency
+			if workflowLimit == 0 {
+				workflowLimit = 2
+			}
+			w, err := e.Store.ClaimWithLimit(ctx, e.owner, workflowLimit)
 			if errors.Is(err, pgx.ErrNoRows) {
 				continue
 			}

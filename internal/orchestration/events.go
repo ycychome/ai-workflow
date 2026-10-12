@@ -239,7 +239,6 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 		if pr.Base.SHA != "" && x.BaseSHA != "" && pr.Base.SHA != x.BaseSHA {
 			x.Generation++
 			x.BaseSHA = pr.Base.SHA
-			x.Control = "ACTIVE"
 			x.Phase = "VERIFYING"
 			if unfinishedDevelopment(x.Tasks) {
 				x.Phase = "DEVELOPING"
