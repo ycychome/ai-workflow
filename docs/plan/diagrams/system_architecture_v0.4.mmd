@@ -1,0 +1,25 @@
+flowchart TB
+    GH["GitHub：Issue / PR / 评论 / Checks / 人工合并"]
+    H["Maintainer：需求、暂停、重规划、接管"] --> GH
+    GH --> GW["Gateway：验签、事件白名单、持久化 Inbox"]
+    GW --> O["Orchestrator：状态机、generation、调度、对账"]
+    O <--> DB[("PostgreSQL：Spec / DAG / Attempt / Evidence / Outbox")]
+    O --> DP["Dev Planner：Triage、开发任务、修复任务"]
+    DP --> DQ["Dev DAG：结构校验、预算与依赖"]
+    DQ --> DW["Builder Pool：独立 clone / 低权限沙箱"]
+    DW --> AV["产物校验：真实 diff、范围、版本、租约"]
+    AV --> INT["串行集成：干净环境、无凭据"]
+    INT --> PUB["Publish Broker：仅受控 GitHub 写入"]
+    PUB --> GH
+    GH --> SNAP["Review Snapshot：固定 Spec / Base / Head / Policy"]
+    SNAP --> RP["Review Planner：独立审查义务与任务"]
+    RP --> RQ["Review DAG：覆盖、依赖、风险下限"]
+    RQ --> RW["Reviewer Pool：独立发现、只读候选"]
+    RW --> SV["Skeptic：反证、遗漏检查、证据请求"]
+    SV --> VR["Verification Runner：隔离执行、日志与测试证据"]
+    VR --> GATE["Merge Gate：身份匹配、覆盖完整、门禁判定"]
+    DB --> GATE
+    GATE --> PUB
+    GATE -->|"修复 / 反证待办"| DP
+    GATE -->|"不确定 / 预算耗尽"| H
+    O -. "状态与取消控制适用于两侧" .-> RP

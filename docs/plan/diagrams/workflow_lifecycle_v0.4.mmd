@@ -1,0 +1,23 @@
+flowchart TD
+    I["Issue 创建或候选需求更新"] --> E{"仓库授权 / 入队资格 / 预算允许？"}
+    E -->|否| HOLD["仅记录或等待授权"]
+    E -->|是| T["Dev Triage：必要性、可行性、验收草案"]
+    T --> DEC{"业务决定"}
+    DEC -->|需澄清| Q["Issue 提问并等待"]
+    Q --> T
+    DEC -->|拒绝或延期建议| HH["Maintainer 可覆核"]
+    DEC -->|接受| SPEC["固定 TaskSpec 与授权版本"]
+    SPEC --> PLAN["Dev DAG"]
+    PLAN --> BUILD["Builder 执行与本地产物"]
+    BUILD --> INTEGRATE["校验 / 集成 / 基线测试"]
+    INTEGRATE --> PR["首次有效变更创建 Draft PR"]
+    PR --> READY["候选冻结并 Ready for Review"]
+    READY --> REV["Review DAG、独立发现、反证与验证"]
+    REV --> G{"Gate 结果"}
+    G -->|需修改| FIX["绑定 Finding 的修复或反证"]
+    FIX --> PLAN
+    G -->|覆盖不足或争议| HH
+    G -->|通过| HUMAN["等待 Maintainer；复核当前版本"]
+    HUMAN -->|合并| DONE["记录 Merged；按实际验收关联 Issue"]
+    HUMAN -->|修改| PLAN
+    HH -->|批准执行或重新规划| SPEC

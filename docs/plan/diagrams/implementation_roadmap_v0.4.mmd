@@ -1,0 +1,5 @@
+flowchart LR
+    M0["M0 可行性 Spike<br/>假 Agent 端到端 + GitHub 门禁 + 隔离"] --> M1["M1 最短真实闭环<br/>1 Builder / 1 Reviewer / 1 次修复"]
+    M1 --> M2["M2 双团队并行<br/>Dev/Review DAG + 2+2 + 集成依赖"]
+    M2 --> M3["M3 对抗与全程介入<br/>反证、覆盖、需求变更、接管"]
+    M3 --> M4["M4 有限 Alpha<br/>故障注入、同预算评估、示例部署"]
