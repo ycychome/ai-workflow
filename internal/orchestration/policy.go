@@ -71,8 +71,8 @@ func validatePlan(tasks []domain.Task) error {
 		}
 		seen[t.ID] = i
 		for _, p := range t.Paths {
-			if p != "**" && !safePath(strings.TrimSuffix(p, "/**")) {
-				return errors.New("unsafe task scope")
+			if p != "**" && !(taskKind(t) != "code" && p == ".") && !safePath(strings.TrimSuffix(p, "/**")) {
+				return fmt.Errorf("task %s has unsafe scope %q", t.ID, p)
 			}
 		}
 	}

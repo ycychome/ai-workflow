@@ -70,6 +70,8 @@ ten bounded tasks with explicit acceptance criteria.
 
 ## Operations and contracts
 
+- [MVP delivery and usage](docs/mvp-delivery.md): installed pilot, dashboard,
+  operational controls, and the exact validation scope.
 - [Local runbook](docs/runbook.md): model/GitHub setup, doctor, tunnel, backup,
   restore, and shutdown.
 - [Workflow Contracts v1](contracts/README.md): domain records, lifecycle,
