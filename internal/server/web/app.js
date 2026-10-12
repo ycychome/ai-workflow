@@ -578,7 +578,7 @@
     header.append(title, summary);
     const scroller = el("div", "flow-scroll");
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 1700 300");
+    svg.setAttribute("viewBox", "0 0 1840 300");
     svg.setAttribute("role", "img");
     svg.setAttribute("aria-label", `${w.repository} Issue ${w.issue} 工作流状态图：${phaseLabel(w.phase)}，${controlLabel(w.control)}`);
     svg.classList.add("workflow-flow-svg");
@@ -595,16 +595,16 @@
     arrow.setAttribute("fill", "currentColor"); marker.append(arrow); defs.append(marker); svg.append(defs);
 
     const x = { issue: 24, eligibility: 152, triage: 280, spec: 408, plan: 536, build: 664, verify: 792,
-      reviewer1: 920, reviewer2: 920, skeptic: 1048, gate: 1176, human: 1304, merged: 1432,
-      hold: 152, "needs-info": 280, "maintainer-review": 408, fix: 1176 };
-    const y = { issue: 68, eligibility: 68, triage: 68, spec: 68, plan: 68, build: 68, verify: 68,
+      reviewer1: 976, reviewer2: 976, skeptic: 1160, gate: 1304, human: 1448, merged: 1592,
+      hold: 152, "needs-info": 280, "maintainer-review": 408, fix: 1304 };
+    const y = { issue: 87, eligibility: 87, triage: 87, spec: 87, plan: 87, build: 87, verify: 87,
       reviewer1: 42, reviewer2: 132, skeptic: 87, gate: 87, human: 87, merged: 87,
       hold: 208, "needs-info": 208, "maintainer-review": 208, fix: 208 };
     const width = 112, height = 46;
-    const connector = (d, cls = "") => {
+    const connector = (d, cls = "", arrowEnd = true) => {
       const path = document.createElementNS(svg.namespaceURI, "path");
       path.setAttribute("d", d); path.setAttribute("class", `flow-connector ${cls}`.trim());
-      path.setAttribute("marker-end", "url(#workflow-flow-arrow)"); svg.append(path);
+      if (arrowEnd) path.setAttribute("marker-end", "url(#workflow-flow-arrow)"); svg.append(path);
     };
     const centerY = key => y[key] + height / 2;
     const right = key => x[key] + width;
@@ -618,12 +618,20 @@
     };
     [["issue", "eligibility"], ["eligibility", "triage"], ["triage", "spec"], ["spec", "plan"], ["plan", "build"], ["build", "verify"]].forEach(([a, b]) => straight(a, b));
     edgeLabel("允许", 140, 58); edgeLabel("符合资格", 268, 58); edgeLabel("接受", 396, 58);
-    connector(`M ${right("verify")} ${centerY("verify")} H 895 V ${centerY("reviewer1")} H ${left("reviewer1")}`);
-    connector(`M 895 ${centerY("reviewer1")} V ${centerY("reviewer2")} H ${left("reviewer2")}`);
-    connector(`M ${right("reviewer1")} ${centerY("reviewer1")} H 1030 V ${centerY("skeptic")} H ${left("skeptic")}`);
-    connector(`M ${right("reviewer2")} ${centerY("reviewer2")} H 1030 V ${centerY("skeptic")} H ${left("skeptic")}`);
+    const forkX = (right("verify") + left("reviewer1")) / 2;
+    const joinX = (right("reviewer1") + left("skeptic")) / 2;
+    connector(`M ${right("verify")} ${centerY("verify")} H ${forkX}`, "", false);
+    connector(`M ${forkX} ${centerY("reviewer1")} V ${centerY("reviewer2")}`, "", false);
+    for (const reviewer of ["reviewer1", "reviewer2"]) {
+      connector(`M ${forkX} ${centerY(reviewer)} H ${left(reviewer)}`);
+      connector(`M ${right(reviewer)} ${centerY(reviewer)} H ${joinX}`, "", false);
+    }
+    connector(`M ${joinX} ${centerY("reviewer1")} V ${centerY("reviewer2")}`, "", false);
+    connector(`M ${joinX} ${centerY("skeptic")} H ${left("skeptic")}`);
     [["skeptic", "gate"], ["gate", "human"], ["human", "merged"]].forEach(([a, b]) => straight(a, b));
-    edgeLabel("审查完成", 1038, 76); edgeLabel("通过", 1296, 77); edgeLabel("维护者合并", 1424, 77);
+    edgeLabel("审查完成", joinX, y.reviewer1 - 10);
+    edgeLabel("通过", (right("gate") + left("human")) / 2, y.gate - 10);
+    edgeLabel("维护者合并", (right("human") + left("merged")) / 2, y.human - 10);
     connector(`M ${centerX("triage")} ${y.triage + height} V ${y["needs-info"]}`);
     edgeLabel("需澄清", 350, 164);
     connector(`M ${centerX("eligibility")} ${y.eligibility + height} V ${y.hold}`);
@@ -632,10 +640,10 @@
     connector(`M ${centerX("triage")} ${y.triage + height} V 182 H ${centerX("maintainer-review")} V ${y["maintainer-review"]}`);
     edgeLabel("拒绝 / 延期建议", 397, 174);
     connector(`M ${right("maintainer-review")} ${centerY("maintainer-review")} H ${centerX("spec")} V ${y.spec + height}`, "flow-loop");
-    connector(`M ${right("gate")} ${centerY("gate")} H 1296 V 182 H ${centerX("maintainer-review")} V ${y["maintainer-review"]}`);
+    connector(`M ${right("gate")} ${centerY("gate")} H 1432 V 182 H ${centerX("maintainer-review")} V ${y["maintainer-review"]}`);
     edgeLabel("覆盖不足 / 争议", 850, 174);
     connector(`M ${centerX("gate")} ${y.gate + height} V ${y.fix}`);
-    edgeLabel("需修改", 1260, 166);
+    edgeLabel("需修改", centerX("gate") + 40, 166);
     connector(`M ${left("fix")} ${centerY("fix")} H 520 V 172 H ${centerX("plan")} V ${y.plan + height}`, "flow-loop");
     connector(`M ${centerX("human")} ${y.human + height} V 284 H ${centerX("plan")} V ${y.plan + height}`, "flow-loop");
     edgeLabel("修改", 970, 279);

@@ -470,7 +470,7 @@ td { color: #596471; font-size: 12px; }
 .flow-header h2 { margin: 0; color: #303a46; font-size: 14px; font-weight: 650; }
 .flow-header p { margin: 5px 0 0; }
 .flow-scroll { overflow-x: auto; padding: 4px 0 8px; border-top: 1px solid #f0f1f3; border-bottom: 1px solid #f0f1f3; }
-.workflow-flow-svg { display: block; width: 1700px; max-width: none; height: 300px; overflow: visible; }
+.workflow-flow-svg { display: block; width: 1840px; max-width: none; height: 300px; overflow: visible; }
 .flow-connector { fill: none; color: #b9c1cb; stroke: currentColor; stroke-width: 1.4; }
 .flow-connector.flow-loop { color: #aeb8c5; stroke-dasharray: 4 3; }
 .flow-edge-label { fill: #788391; font: 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
