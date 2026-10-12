@@ -40,6 +40,15 @@ func TestValidatePlanTaskKindScopes(t *testing.T) {
 			task: domain.Task{ID: "analysis-dot", Kind: "analysis", Description: "analysis task", Paths: []string{"."}},
 		},
 		{
+			name: "verification directory scope allowed",
+			task: domain.Task{ID: "verify-directory", Kind: "verification", Description: "verify task", Paths: []string{"review_tests/"}},
+		},
+		{
+			name:    "verification absolute directory rejected",
+			task:    domain.Task{ID: "verify-absolute", Kind: "verification", Description: "verify task", Paths: []string{"/tmp/"}},
+			wantErr: true,
+		},
+		{
 			name:    "verification parent traversal rejected",
 			task:    domain.Task{ID: "verify-parent", Kind: "verification", Description: "verify task", Paths: []string{"../outside"}},
 			wantErr: true,

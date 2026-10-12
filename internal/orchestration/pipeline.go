@@ -15,6 +15,34 @@ import (
 	"sync"
 )
 
+func validateDevPlanReport(output json.RawMessage) error {
+	var report struct {
+		Tasks []domain.Task `json:"tasks"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		return fmt.Errorf("decode development plan: %w", err)
+	}
+	return validatePlan(report.Tasks)
+}
+
+func validateReviewPlanReport(output json.RawMessage) error {
+	var report struct {
+		Tasks []domain.Task `json:"tasks"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		return fmt.Errorf("decode review plan: %w", err)
+	}
+	if err := validatePlan(report.Tasks); err != nil {
+		return err
+	}
+	for _, task := range report.Tasks {
+		if task.Kind != "verification" {
+			return fmt.Errorf("review task %s must have kind verification", task.ID)
+		}
+	}
+	return nil
+}
+
 func (e *Engine) triage(ctx context.Context, w *domain.Workflow) error {
 	var report struct {
 		Decision, Title, Description, Risk string
@@ -99,7 +127,7 @@ func (e *Engine) plan(ctx context.Context, w *domain.Workflow) error {
 			return err
 		}
 		defer cleanup()
-		out, err := e.ask(ctx, *w, devPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "findings": w.Review.Findings, "base_sha": w.BaseSHA, "head_sha": w.HeadSHA})), session.readTools(), planSchema())
+		out, err := e.ask(ctx, *w, devPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "findings": w.Review.Findings, "base_sha": w.BaseSHA, "head_sha": w.HeadSHA})), session.readTools(), planSchema(), validateDevPlanReport)
 		w.Evidence = append(w.Evidence, session.listEvidence()...)
 		if err != nil {
 			return err
@@ -543,7 +571,7 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 				return err
 			}
 			session := &toolSession{e: e, w: *w, workspace: workspace, review: true, baseFiles: baseFiles}
-			output, askErr := e.ask(ctx, *w, reviewPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "mandatory_obligations": baseline, "head_sha": w.HeadSHA})), session.tools(), reviewPlanSchema())
+			output, askErr := e.ask(ctx, *w, reviewPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "mandatory_obligations": baseline, "head_sha": w.HeadSHA})), session.tools(), reviewPlanSchema(), validateReviewPlanReport)
 			e.Sandbox.Destroy(context.Background(), workspace)
 			w.Evidence = append(w.Evidence, session.listEvidence()...)
 			if askErr != nil {

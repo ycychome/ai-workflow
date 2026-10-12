@@ -285,7 +285,7 @@ func (e *Engine) settleControls(ctx context.Context) {
 		})
 	}
 }
-func (e *Engine) ask(ctx context.Context, w domain.Workflow, role, input string, tools []agent.Tool, schema json.RawMessage) (json.RawMessage, error) {
+func (e *Engine) ask(ctx context.Context, w domain.Workflow, role, input string, tools []agent.Tool, schema json.RawMessage, validators ...func(json.RawMessage) error) (json.RawMessage, error) {
 	cfg := e.Config()
 	token, err := os.ReadFile(cfg.Model.TokenFile)
 	if err != nil {
@@ -299,7 +299,20 @@ func (e *Engine) ask(ctx context.Context, w domain.Workflow, role, input string,
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.Run(ctx, agent.Request{System: role, Input: raw(input), Model: model, Tools: tools, ReportSchema: schema, MaxCalls: cfg.Budget.IssueCalls, MaxRequests: cfg.Budget.IssueCalls, BeforeRequest: func(c context.Context) error {
+	var validateReport func(json.RawMessage) error
+	if len(validators) > 0 {
+		validateReport = func(report json.RawMessage) error {
+			for _, validate := range validators {
+				if validate != nil {
+					if err := validate(report); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+	}
+	res, err := r.Run(ctx, agent.Request{System: role, Input: raw(input), Model: model, Tools: tools, ReportSchema: schema, MaxCalls: cfg.Budget.IssueCalls, MaxRequests: cfg.Budget.IssueCalls, ValidateReport: validateReport, BeforeRequest: func(c context.Context) error {
 		live := e.Config()
 		return e.Store.ReserveRequest(c, w.ID, w.Generation, live.Budget.IssueCalls, live.Budget.DailyCalls)
 	}, OnUsage: func(c context.Context, u agent.Usage) error {

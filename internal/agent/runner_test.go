@@ -3,12 +3,66 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestInvalidReportFeedbackCanBeCorrectedWithinRequestBudget(t *testing.T) {
+	var requests, hooks, validations int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = fmt.Fprintln(w, `{"id":"resp-1","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[]},{"type":"function_call","id":"fc_1","call_id":"submit-1","name":"submit_report","arguments":"{\"ok\":false}"}]}`)
+			return
+		}
+		var body struct {
+			Input []json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		joined, _ := json.Marshal(body.Input)
+		for _, fragment := range []string{`"type":"reasoning"`, `"type":"function_call"`, `"call_id":"submit-1"`, `"type":"function_call_output"`, `ok must be true`} {
+			if !strings.Contains(string(joined), fragment) {
+				t.Fatalf("corrective request omitted %s: %s", fragment, joined)
+			}
+		}
+		_, _ = fmt.Fprintln(w, `{"id":"resp-2","status":"completed","output":[{"type":"function_call","id":"fc_2","call_id":"submit-2","name":"submit_report","arguments":"{\"ok\":true}"}]}`)
+	}))
+	defer server.Close()
+	runner, err := NewRunner(Config{BaseURL: server.URL, Token: "token", Model: "model", MaxOutputTokens: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.Run(context.Background(), Request{
+		Input: json.RawMessage(`"make a report"`), MaxCalls: 0, MaxRequests: 2,
+		BeforeRequest: func(context.Context) error { hooks++; return nil },
+		ReportSchema:  json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`),
+		ValidateReport: func(report json.RawMessage) error {
+			validations++
+			var value struct {
+				OK bool `json:"ok"`
+			}
+			if err := json.Unmarshal(report, &value); err != nil {
+				return err
+			}
+			if !value.OK {
+				return errors.New("ok must be true")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || hooks != 2 || validations != 2 || result.Requests != 2 || string(result.Report) != `{"ok":true}` {
+		t.Fatalf("requests=%d hooks=%d validations=%d result=%+v", requests, hooks, validations, result)
+	}
+}
 
 func TestRunPreservesOutputItemsAndSubmitsRawReport(t *testing.T) {
 	var requests int

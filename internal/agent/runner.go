@@ -23,15 +23,16 @@ type Tool struct {
 // Request is one bounded agent run. Input is any JSON value accepted by the
 // Responses API input field, commonly a JSON string or an array of input items.
 type Request struct {
-	System        string
-	Input         json.RawMessage
-	Model         string
-	Tools         []Tool
-	ReportSchema  json.RawMessage
-	MaxCalls      int
-	MaxRequests   int
-	BeforeRequest func(context.Context) error
-	OnUsage       func(context.Context, Usage) error
+	System         string
+	Input          json.RawMessage
+	Model          string
+	Tools          []Tool
+	ReportSchema   json.RawMessage
+	MaxCalls       int
+	MaxRequests    int
+	BeforeRequest  func(context.Context) error
+	OnUsage        func(context.Context, Usage) error
+	ValidateReport func(json.RawMessage) error
 }
 
 // Usage contains the token totals reported by each completed response.
@@ -178,8 +179,22 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 			if reportCount != 1 || len(calls) != 1 {
 				return result, errors.New("agent: submit_report must be the only function call in its response")
 			}
-			if err := validateJSONValue(calls[0].Arguments, reportSchema); err != nil {
-				return result, fmt.Errorf("agent: submitted report does not match ReportSchema: %w", err)
+			reportErr := validateJSONValue(calls[0].Arguments, reportSchema)
+			if reportErr == nil && req.ValidateReport != nil {
+				reportErr = req.ValidateReport(calls[0].Arguments)
+			}
+			if reportErr != nil {
+				if requestsMade >= req.MaxRequests {
+					return result, fmt.Errorf("agent: submitted report rejected and request limit exhausted: %w", reportErr)
+				}
+				inputItems = append(inputItems, response.Output...)
+				feedback, _ := json.Marshal(map[string]string{"error": "submitted report rejected: " + reportErr.Error()})
+				outputItem, err := json.Marshal(functionOutputItem{Type: "function_call_output", CallID: calls[0].CallID, Output: string(feedback)})
+				if err != nil {
+					return result, fmt.Errorf("agent: encode report validation feedback: %w", err)
+				}
+				inputItems = append(inputItems, outputItem)
+				continue
 			}
 			result.Report = append(json.RawMessage(nil), calls[0].Arguments...)
 			return result, nil
