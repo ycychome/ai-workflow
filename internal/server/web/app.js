@@ -22,6 +22,7 @@
   let workflowListSignature = "";
   let githubInfoSignature = "";
   const evidenceViews = new Map();
+  const flowViews = new Map();
 
   class APIError extends Error {
     constructor(message, status) { super(message); this.status = status; }
@@ -509,7 +510,7 @@
               : ["DEVELOPING", "CHANGES_REQUESTED"].includes(phase) ? (phase === "CHANGES_REQUESTED" ? "fix" : "build")
                 : phase === "VERIFYING" ? "verify"
         : phase === "REVIEWING" ? (reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : firstIncomplete <= 1 ? (firstIncomplete === 1 ? "reviewer2" : "reviewer1") : "reviewer2")
-          : phase === "BLOCKED" ? (w.review?.verification_passed ? reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : "reviewer1" : w.tasks?.length ? "verify" : "plan")
+          : phase === "BLOCKED" ? (w.review?.verification_passed ? reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : "reviewer1" : w.tasks?.length ? (w.tasks.some(task => !["INTEGRATED", "SUPERSEDED"].includes(task.status)) ? "build" : "verify") : w.spec?.approved ? "plan" : "triage")
             : phase === "READY" ? "gate" : ["AWAITING_MAINTAINER", "MERGED"].includes(phase) ? "human" : terminalProposal ? "maintainer-review" : "";
     let status = "pending";
     const completedByStage = {
@@ -658,6 +659,7 @@
     for (const [key, label, statusKey, detail] of nodes) {
       const group = document.createElementNS(svg.namespaceURI, "g");
       group.setAttribute("class", `flow-node is-${flowStatus(w, statusKey)}`);
+      group.dataset.flowNode = key;
       const status = flowStatus(w, statusKey);
       const accessible = `${label}，${detail}，${({ done: "已完成", active: "当前步骤", pending: "待执行", paused: "已暂停", blocked: "受阻", human: "人工控制", cancelled: "已取消", stale: "历史 / 待重审" })[status] || status}`;
       group.setAttribute("aria-label", accessible);
@@ -676,6 +678,27 @@
       textNode.append(labelLine, detailLine); group.append(textNode); svg.append(group);
     }
     scroller.append(svg);
+    const viewIdentity = `${w.phase}|${w.control}|${w.generation}`;
+    const previousView = flowViews.get(w.id);
+    const view = previousView?.identity === viewIdentity ? previousView : { identity: viewIdentity, scrollLeft: null };
+    flowViews.set(w.id, view);
+    const locateCurrent = () => {
+      const node = w.phase === "MERGED" ? svg.querySelector('[data-flow-node="merged"]') : svg.querySelector('.is-active, .is-paused, .is-blocked, .is-human, .is-cancelled');
+      if (!node) return;
+      const box = node.getBoundingClientRect();
+      const viewport = scroller.getBoundingClientRect();
+      scroller.scrollLeft += box.left + box.width / 2 - viewport.left - viewport.width / 2;
+      view.scrollLeft = scroller.scrollLeft;
+    };
+    scroller.addEventListener("scroll", () => { view.scrollLeft = scroller.scrollLeft; });
+    const locate = el("button", "text-button flow-locate", "定位当前状态");
+    locate.type = "button";
+    locate.addEventListener("click", locateCurrent);
+    summary.append(locate);
+    window.requestAnimationFrame(() => {
+      if (Number.isFinite(view.scrollLeft)) scroller.scrollLeft = view.scrollLeft;
+      else locateCurrent();
+    });
     const note = el("p", "flow-note", flowStateNote(w));
     const legend = el("div", "flow-legend");
     [["done", "已完成"], ["active", "当前步骤"], ["pending", "待执行"], ["paused", "暂停中"], ["blocked", "受阻 / 待确认"], ["stale", "历史 / 待重审"], ["human", "人工控制"], ["cancelled", "已取消"]].forEach(([cls, label]) => {
