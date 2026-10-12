@@ -305,6 +305,9 @@ func (e *Engine) ask(ctx context.Context, w domain.Workflow, role, input string,
 		return e.Store.Usage(c, w.ID, u.InputTokens, u.OutputTokens)
 	}})
 	e.Store.Audit(context.WithoutCancel(ctx), w.ID, "model_run", map[string]any{"role": strings.Split(role, " You are ")[len(strings.Split(role, " You are "))-1][:min(64, len(strings.Split(role, " You are ")[len(strings.Split(role, " You are "))-1]))], "requests": res.Requests, "usage": res.Usage, "error": errString(err)})
+	if err == nil && len(res.Report) > 0 {
+		e.Store.Audit(context.WithoutCancel(ctx), w.ID, "model_report", map[string]any{"generation": w.Generation, "report": json.RawMessage(e.redact(string(res.Report)))})
+	}
 	return res.Report, err
 }
 func errString(err error) string {

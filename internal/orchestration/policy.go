@@ -60,8 +60,8 @@ func validatePlan(tasks []domain.Task) error {
 	}
 	seen := map[string]int{}
 	for i, t := range tasks {
-		if t.ID == "" || len(t.ID) > 80 || t.Description == "" || len(t.Paths) == 0 {
-			return errors.New("task ID, description and path scope are required")
+		if t.ID == "" || len(t.ID) > 80 || t.Description == "" || (taskKind(t) == "code" && len(t.Paths) == 0) {
+			return fmt.Errorf("task %q requires a valid ID and description; code tasks require a path scope", t.ID)
 		}
 		if t.Kind != "" && t.Kind != "code" && t.Kind != "verification" && t.Kind != "analysis" {
 			return fmt.Errorf("task %s has unsupported kind %q", t.ID, t.Kind)
