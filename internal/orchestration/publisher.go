@@ -318,6 +318,9 @@ func (e *Engine) issueComment(ctx context.Context, w domain.Workflow, commentID 
 	if strings.Contains(trimmed, "<!-- ai-workflow-action-id:") {
 		return nil
 	}
+	if commentID > 0 {
+		ctx = store.WithCommand(ctx, fmt.Sprintf("github:%d:%d", w.RepositoryID, commentID))
+	}
 	if !strings.HasPrefix(strings.ToLower(trimmed), "/ai ") && strings.ToLower(trimmed) != "/ai" {
 		if trimmed == "" {
 			return nil
