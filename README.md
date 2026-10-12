@@ -11,10 +11,11 @@ external-effect Outbox recovery, and a human Maintainer as the only merger.
 The MVP can run a deterministic Fake walkthrough without model or GitHub
 credentials. The pilot fixture intentionally begins with a failing `Add` test
 for the Issue **Repair Add**; Fake mode demonstrates a fixed run through
-`AWAITING_MAINTAINER`. Real-model evaluation is a separate acceptance step:
-configure a Responses-compatible endpoint, token, Dev model, and Review model,
-then run the required evaluation. No successful real-model evaluation is
-claimed until that has happened.
+`AWAITING_MAINTAINER`. A real Responses walkthrough with `deepseek-v4.1-flash` has also completed
+Dev, two Reviewers, Skeptic and the current-head GitHub merge gate on
+[pilot PR #6](https://github.com/ycychome/ai-workflow-pilot/pull/6). This is a
+bounded functional smoke run; the larger fault matrix and model-effectiveness
+benchmark remain unevaluated. See the exact [delivery scope](docs/mvp-delivery.md).
 
 ## Start locally
 

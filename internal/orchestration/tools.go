@@ -14,14 +14,15 @@ import (
 )
 
 type toolSession struct {
-	e         *Engine
-	w         domain.Workflow
-	workspace *sandbox.Workspace
-	scope     []string
-	review    bool
-	baseFiles map[string]sandbox.File
-	mu        sync.Mutex
-	evidence  []domain.Evidence
+	e                *Engine
+	w                domain.Workflow
+	workspace        *sandbox.Workspace
+	scope            []string
+	review           bool
+	baseFiles        map[string]sandbox.File
+	mu               sync.Mutex
+	evidence         []domain.Evidence
+	readableEvidence []domain.Evidence
 }
 
 func (e *Engine) plannerSession(ctx context.Context, w *domain.Workflow, role string) (*toolSession, func(), error) {
@@ -88,7 +89,12 @@ func (t *toolSession) listEvidence() []domain.Evidence {
 	defer t.mu.Unlock()
 	return append([]domain.Evidence(nil), t.evidence...)
 }
-func (t *toolSession) handler(ctx context.Context, name string, args json.RawMessage) (string, error) {
+func (t *toolSession) handler(ctx context.Context, name string, args json.RawMessage) (output string, retErr error) {
+	defer func() {
+		if retErr != nil {
+			t.e.Store.Audit(context.WithoutCancel(ctx), t.w.ID, "tool_error", map[string]any{"generation": t.w.Generation, "tool": name, "arguments": t.e.redact(string(args)), "error": t.e.redact(retErr.Error())})
+		}
+	}()
 	current, err := t.e.Store.Get(ctx, t.w.ID)
 	if err != nil {
 		return "", err
@@ -97,17 +103,30 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 		return "", errors.New("run authorization revoked")
 	}
 	var p struct {
-		Path    string   `json:"path"`
-		Content string   `json:"content"`
-		Query   string   `json:"query"`
-		Args    []string `json:"args"`
-		Timeout int      `json:"timeout_seconds"`
+		Path       string   `json:"path"`
+		Content    string   `json:"content"`
+		Query      string   `json:"query"`
+		Args       []string `json:"args"`
+		Timeout    int      `json:"timeout_seconds"`
+		EvidenceID string   `json:"evidence_id"`
 	}
 	if err = json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
 	m := t.e.Sandbox
 	switch name {
+	case "read_evidence":
+		for _, ev := range t.readableEvidence {
+			if ev.ID == p.EvidenceID {
+				content, err := readRecordedEvidence(t.e.Config().DataDir, t.w.ID, ev)
+				if err != nil {
+					return "", err
+				}
+				read, err := t.record(ctx, "SOURCE_ANALYSIS", map[string]any{"recorded_evidence_id": ev.ID, "recorded_hash": ev.Hash, "content": json.RawMessage(t.e.redact(string(content)))}, nil, 0)
+				return string(raw(map[string]any{"recorded_evidence_id": ev.ID, "kind": ev.Kind, "exit_code": ev.ExitCode, "content": json.RawMessage(t.e.redact(string(content))), "evidence_id": read.ID})), err
+			}
+		}
+		return "", errors.New("evidence ID is not in the assigned proof set")
 	case "workflow_state":
 		// This projection comes from the control store, not model-written reports.
 		// The publisher has no merge operation; human_merge_required is supervisor policy.
@@ -191,6 +210,9 @@ func (t *toolSession) tools() []agent.Tool {
 		{Name: "search", Description: "Search source text and obtain evidence ID", Parameters: props(map[string]any{"query": str()}), Handler: t.handler},
 		{Name: "write_file", Description: "Write assigned source; reviewers only supplemental tests under review_tests/", Parameters: props(map[string]any{"path": str(), "content": str()}), Handler: t.handler},
 		{Name: "run", Description: "Run an argument vector in an isolated, credential-free, network-disabled container. Use sh -lc for shell commands. Obtain trusted exit/log evidence", Parameters: props(map[string]any{"args": array(str()), "timeout_seconds": map[string]any{"type": "integer"}}), Handler: t.handler},
+	}
+	if len(t.readableEvidence) > 0 {
+		tools = append(tools, agent.Tool{Name: "read_evidence", Description: "Read the hash-verified JSON body of an assigned evidence ID from accepted peer reports. Controller file paths are inaccessible through read_file; use this tool with the unchanged evidence ID. It grants no arbitrary file access.", Parameters: props(map[string]any{"evidence_id": str()}), Handler: t.handler})
 	}
 	if t.baseFiles != nil {
 		tools = append(tools, agent.Tool{Name: "read_base_file", Description: "Read a file at the fixed target branch base snapshot", Parameters: props(map[string]any{"path": str()}), Handler: t.handler}, agent.Tool{Name: "candidate_diff", Description: "Read independently computed base-to-candidate source changes", Parameters: props(map[string]any{}), Handler: t.handler})

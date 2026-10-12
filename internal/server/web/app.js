@@ -15,9 +15,13 @@
     "review deep": "深度审查", takeover: "人工接管", accept: "接受结果", reject: "拒绝结果", defer: "稍后处理"
   };
   const healthNames = { database: "数据库", github: "GitHub", model: "模型服务", sandbox: "隔离执行" };
-  const state = { workflows: [], health: {}, config: {}, selected: "", authenticated: false, settingsLoaded: false, auditEntries: [], busy: false };
+  const state = { workflows: [], health: {}, config: {}, selected: "", authenticated: false, settingsLoaded: false, auditEntries: [], route: null };
   let toastTimer = 0;
   let pollTimer = 0;
+  let overviewSignature = "";
+  let workflowListSignature = "";
+  let githubInfoSignature = "";
+  const evidenceViews = new Map();
 
   class APIError extends Error {
     constructor(message, status) { super(message); this.status = status; }
@@ -145,7 +149,8 @@
       state.workflows = Array.isArray(data?.workflows) ? data.workflows : [];
       state.health = data?.health || {};
       state.config = data?.config || {};
-      if (!state.selected || !state.workflows.some(w => w.id === state.selected)) state.selected = state.workflows[0]?.id || "";
+      if (state.route?.page === "workflow-detail") state.selected = state.route.id;
+      else if (state.selected && !state.workflows.some(w => w.id === state.selected)) state.selected = "";
       if (!state.authenticated) showApp();
       renderState();
       setRefreshState(`更新于 ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`);
@@ -246,14 +251,22 @@
       const calls = document.createElement("td"); calls.append(el("span", "numeric-cell", formatNumber(workflow.model_calls))); row.append(calls);
     }
     const updated = document.createElement("td"); updated.textContent = formatTime(workflow.updated_at); row.append(updated);
-    row.addEventListener("click", () => { selectWorkflow(workflow.id); setView("workflows"); });
+    row.addEventListener("click", () => selectWorkflow(workflow.id));
     return row;
   }
 
   function renderOverview(workflows) {
+    const signature = JSON.stringify({ selected: state.selected, rows: workflows.slice(0, 8).map(w => [w.id, w.phase, w.control, w.generation, w.model_calls, w.updated_at]) });
+    if (signature === overviewSignature) return;
+    overviewSignature = signature;
+    const scrollY = window.scrollY;
+    const tableScroll = $("#overview-rows").closest(".table-scroll");
+    const scrollLeft = tableScroll.scrollLeft;
     const body = $("#overview-rows"); body.replaceChildren();
     workflows.slice(0, 8).forEach(w => body.append(createWorkflowRow(w)));
     $("#overview-empty").hidden = workflows.length !== 0;
+    tableScroll.scrollLeft = scrollLeft;
+    window.scrollTo({ top: scrollY, behavior: "auto" });
   }
 
   function populateFilters(workflows) {
@@ -280,17 +293,21 @@
       const searchable = `${w.repository || ""} ${w.issue || ""} ${workflowTitle(w)} ${w.id || ""}`.toLowerCase();
       return (!query || searchable.includes(query)) && (!phase || w.phase === phase) && (!control || w.control === control);
     });
+    const signature = JSON.stringify({ query, phase, control, selected: state.selected, rows: visible.map(w => [w.id, w.phase, w.control, w.generation, w.pr, w.model_calls, w.tasks?.length, w.updated_at]) });
+    if (signature === workflowListSignature) return;
+    workflowListSignature = signature;
+    const scrollY = window.scrollY;
+    const tableScroll = $("#workflow-rows").closest(".table-scroll");
+    const scrollLeft = tableScroll.scrollLeft;
     const body = $("#workflow-rows"); body.replaceChildren();
     visible.forEach(w => body.append(createWorkflowRow(w, true)));
     $("#workflow-empty").hidden = visible.length !== 0;
-    renderWorkflowDetail(workflows.find(w => w.id === state.selected));
+    tableScroll.scrollLeft = scrollLeft;
+    window.scrollTo({ top: scrollY, behavior: "auto" });
   }
 
   function selectWorkflow(id) {
-    state.selected = id;
-    renderOverview(state.workflows);
-    renderWorkflows(state.workflows);
-    if ($("#audit-workflow")) $("#audit-workflow").value = id;
+    navigate(`/workflows/${encodeURIComponent(id)}/overview`);
   }
 
   function detailPair(list, label, value) {
@@ -316,130 +333,267 @@
     return box;
   }
 
-  function renderWorkflowDetail(w) {
+  function reviewContent(w) {
+    const content = el("div");
+    const summary = el("ul", "detail-list");
+    detailPair(summary, "本地评审结论", w.review?.verdict);
+    detailPair(summary, "评审理由", w.review?.reason);
+    detailPair(summary, "验证通过", w.review?.verification_passed ? "是" : "否");
+    detailPair(summary, "Skeptic 完成", w.review?.skeptic_complete ? "是" : "否");
+    content.append(summary);
+    const reviewTasks = w.review?.tasks || [];
+    content.append(el("h4", "subsection-title", `评审任务 · ${reviewTasks.length}`));
+    if (reviewTasks.length) reviewTasks.forEach(task => {
+      const item = el("div", "item-card");
+      item.append(el("strong", "", `${text(task.id, "评审任务")} · ${taskLabel(task.status)}`));
+      item.append(el("p", "", text(task.description, "无任务说明")));
+      if (task.paths?.length) item.append(el("p", "", `覆盖文件：${task.paths.join("、")}`));
+      item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));
+      if (task.obligation_ids?.length) item.append(el("p", "", `对应义务：${task.obligation_ids.join("、")}`));
+      if (task.report) item.append(reportDetails(task.report, "查看评审报告"));
+      content.append(item);
+    });
+    const found = w.review?.findings || [];
+    content.append(el("h4", "subsection-title", `审查发现 · ${found.length}`));
+    if (found.length) found.forEach(finding => {
+      const item = el("div", "item-card");
+      const line = el("strong", "");
+      line.append(el("span", `finding-severity ${(finding.severity || "").toLowerCase()}`, text(finding.severity, "发现项")), document.createTextNode(`${text(finding.id)} · ${text(finding.state)}`));
+      item.append(line, el("p", "", `${text(finding.path)}${finding.line ? `:${finding.line}` : ""} · ${text(finding.description)}`));
+      if (finding.expected || finding.actual) item.append(el("p", "", `预期：${text(finding.expected)}；实际：${text(finding.actual)}`));
+      content.append(item);
+    });
+    if (!reviewTasks.length && !found.length) content.append(el("p", "muted", "暂无评审任务或发现项。"));
+    content.append(el("h4", "subsection-title", "当前规格 · 验收标准"), criteriaList(w.spec));
+    if (w.proposal_spec) {
+      content.append(el("h4", "subsection-title", w.proposal_spec.approved ? "已批准方案" : "待批准方案"));
+      const proposal = el("div", "proposal-content");
+      proposal.append(el("h4", "", text(w.proposal_spec.title, "未命名方案")), el("p", "", text(w.proposal_spec.description, "暂无方案说明")));
+      proposal.append(el("strong", "subsection-title", "提案验收标准"), criteriaList(w.proposal_spec));
+      if (w.proposal_spec.non_goals?.length) proposal.append(el("p", "", `非目标：${w.proposal_spec.non_goals.join("；")}`));
+      content.append(proposal);
+    }
+    return content;
+  }
+
+  function reportDetails(report, label) {
+    const details = el("details", "report-details");
+    const summary = el("summary", "", label);
+    const content = typeof report === "string" ? report : JSON.stringify(report, null, 2);
+    details.append(summary, el("pre", "inline-report", content));
+    return details;
+  }
+
+  function currentEvidence(item, workflow) {
+    const expected = String(workflow.tested_sha || workflow.head_sha || "").toLowerCase();
+    const actual = String(item.tested_commit_sha || item.head_sha || "").toLowerCase();
+    return Boolean(expected && actual && expected === actual);
+  }
+
+  function renderEvidenceTable(workflow, host) {
+    const evidenceItems = Array.isArray(workflow.evidence) ? workflow.evidence : [];
+    let view = evidenceViews.get(workflow.id);
+    if (!view) {
+      view = { kind: "", revision: "all", page: 1 };
+      evidenceViews.set(workflow.id, view);
+    }
+    const perPage = 20;
+    const types = [...new Set(evidenceItems.map(item => text(item.kind, "其他")))].sort();
+    if (view.kind && !types.includes(view.kind)) view.kind = "";
+    const filtered = evidenceItems.filter(item => {
+      if (view.kind && text(item.kind, "其他") !== view.kind) return false;
+      const isCurrent = currentEvidence(item, workflow);
+      return view.revision === "all" || (view.revision === "current" ? isCurrent : !isCurrent);
+    });
+    const pages = Math.max(1, Math.ceil(filtered.length / perPage));
+    view.page = Math.min(Math.max(1, view.page), pages);
+
+    const toolbar = el("div", "evidence-toolbar");
+    const count = el("span", "evidence-count", `共 ${filtered.length} 条${filtered.length !== evidenceItems.length ? ` / ${evidenceItems.length} 条` : ""}`);
+    const kind = document.createElement("select");
+    kind.setAttribute("aria-label", "按证据类型筛选");
+    kind.append(new Option("所有类型", ""));
+    types.forEach(type => kind.add(new Option(type, type)));
+    kind.value = view.kind;
+    kind.addEventListener("change", () => {
+      view.kind = kind.value;
+      view.page = 1;
+      rerenderDetailTab(workflow, "evidence");
+    });
+    const revision = document.createElement("select");
+    revision.setAttribute("aria-label", "筛选当前提交或历史证据");
+    [["all", "所有提交"], ["current", "当前提交"], ["history", "历史提交"]].forEach(([value, label]) => revision.add(new Option(label, value)));
+    revision.value = view.revision;
+    revision.addEventListener("change", () => {
+      view.revision = revision.value;
+      view.page = 1;
+      rerenderDetailTab(workflow, "evidence");
+    });
+    toolbar.append(count, kind, revision);
+
+    const table = el("div", "evidence-table-wrap card");
+    const scroll = el("div", "table-scroll");
+    const tableNode = document.createElement("table");
+    tableNode.className = "evidence-table";
+    const head = document.createElement("thead");
+    const headingRow = document.createElement("tr");
+    ["类型", "时间", "命令或证据 ID", "提交", "状态", "查看"].forEach(label => headingRow.append(el("th", "", label)));
+    head.append(headingRow);
+    const body = document.createElement("tbody");
+    const start = (view.page - 1) * perPage;
+    for (const item of filtered.slice(start, start + perPage)) {
+      const row = document.createElement("tr");
+      row.append(el("td", "", text(item.kind, "其他")));
+      row.append(el("td", "", formatTime(item.created_at)));
+      const command = Array.isArray(item.command) ? item.command.join(" ") : "";
+      row.append(el("td", "evidence-command", command || text(item.id)));
+      const isCurrent = currentEvidence(item, workflow);
+      row.append(el("td", "", isCurrent ? "当前提交" : "历史提交"));
+      row.append(el("td", "", item.exit_code === 0 ? "成功（0）" : `失败（${text(item.exit_code, "未知")}）`));
+      const action = document.createElement("td");
+      const open = el("button", "evidence-open-row", "查看");
+      open.type = "button";
+      open.disabled = !item.id;
+      open.addEventListener("click", () => loadEvidence(workflow.id, item));
+      action.append(open);
+      row.append(action);
+      body.append(row);
+    }
+    tableNode.append(head, body);
+    scroll.append(tableNode);
+    table.append(scroll);
+    if (!filtered.length) table.append(el("div", "empty-state", "没有符合筛选条件的证据。"));
+
+    const pagination = el("div", "evidence-pagination");
+    const previous = el("button", "button button-secondary", "← 上一页");
+    previous.type = "button";
+    previous.disabled = view.page <= 1;
+    previous.addEventListener("click", () => { view.page--; rerenderDetailTab(workflow, "evidence"); });
+    const next = el("button", "button button-secondary", "下一页 →");
+    next.type = "button";
+    next.disabled = view.page >= pages;
+    next.addEventListener("click", () => { view.page++; rerenderDetailTab(workflow, "evidence"); });
+    pagination.append(previous, el("span", "evidence-page-number", `第 ${view.page} / ${pages} 页`), next);
+    host.append(toolbar, table, pagination);
+  }
+
+  function rerenderDetailTab(workflow, tab) {
     const container = $("#workflow-detail");
+    delete container.dataset.renderSignature;
+    renderWorkflowDetail(workflow, tab);
+  }
+
+  function renderWorkflowDetail(w, tab = "overview") {
+    const container = $("#workflow-detail");
+    if (!w) {
+      delete container.dataset.renderSignature;
+      container.replaceChildren(el("div", "detail-placeholder", "工作流尚未加载或已不存在。"));
+      return;
+    }
+    const signature = `${w.id}|${tab}|${JSON.stringify(w)}`;
+    if (container.dataset.renderSignature === signature) return;
+    const scrollY = window.scrollY;
+    const oldContent = $("#workflow-detail-content", container);
+    const contentScrollTop = oldContent?.scrollTop || 0;
+    container.dataset.renderSignature = signature;
     container.replaceChildren();
-    if (!w) { container.append(el("div", "detail-placeholder", "选择一条工作流查看详情。")); return; }
 
     const heading = el("div", "detail-heading");
     const intro = el("div");
-    intro.append(el("h2", "", workflowTitle(w)), el("p", "", `${text(w.repository)} · Issue #${text(w.issue)} · ${text(w.id)}`));
+    intro.append(el("h1", "", workflowTitle(w)), el("p", "", `${text(w.repository)} · Issue #${text(w.issue)} · ${text(w.id)}`));
     const meta = el("div", "detail-meta");
     meta.append(statusBadge(w.phase, phaseLabel(w.phase)), statusBadge(w.control, controlLabel(w.control)), statusBadge("muted", `代次 ${text(w.generation, 0)}`));
     if (w.pr) meta.append(statusBadge("blue", `PR #${w.pr}`));
     intro.append(meta);
     const actions = el("div", "command-actions");
-    for (const command of ["status", "pause", "resume", "replan", "review deep", "takeover", "accept", "reject", "defer", "cancel"]) {
+    const phaseCanAccept = ["INTAKE", "SPEC_READY"].includes(w.phase) && !["CANCELLING", "CANCELLED"].includes(w.control);
+    const phaseCanRejectOrDefer = ["INTAKE", "TRIAGE", "SPEC_READY"].includes(w.phase);
+    const phaseCanPause = w.control === "ACTIVE" && !["MERGED", "BLOCKED"].includes(w.phase);
+    const phaseCanResume = w.phase === "BLOCKED" ? !["COMPLETED", "CANCELLED", "CANCELLING"].includes(w.control) : !["ACTIVE", "COMPLETED", "CANCELLED", "CANCELLING"].includes(w.control);
+    for (const command of ["accept", "resume", "pause"]) {
       const button = el("button", "command-button", commandNames[command]);
       button.type = "button";
+      button.dataset.command = command;
+      button.disabled = command === "accept" ? !phaseCanAccept : command === "resume" ? !phaseCanResume : !phaseCanPause;
+      if (button.disabled) continue;
       button.addEventListener("click", () => sendCommand(w, command));
       actions.append(button);
     }
+    const more = el("details", "command-menu");
+    const summary = el("summary", "", "更多操作");
+    more.append(summary);
+    const menu = el("div", "command-menu-items");
+    for (const command of ["status", "replan", "review deep", "takeover", "reject", "defer", "cancel"]) {
+      const button = el("button", "command-button", commandNames[command]);
+      button.type = "button";
+      button.dataset.command = command;
+      if (command === "reject") button.disabled = w.phase !== "SPEC_READY";
+      if (command === "defer") button.disabled = !phaseCanRejectOrDefer;
+      if (command === "review deep") button.disabled = !w.pr || w.control === "COMPLETED";
+      if (command === "replan") button.disabled = w.phase === "MERGED" || ["CANCELLED", "CANCELLING"].includes(w.control);
+      if (button.disabled) button.title = "当前阶段或控制状态不支持此操作";
+      button.addEventListener("click", () => sendCommand(w, command));
+      menu.append(button);
+    }
+    more.append(menu);
+    actions.append(more);
     heading.append(intro, actions);
 
-    const grid = el("div", "detail-grid");
-    const metrics = el("ul", "detail-list");
-    detailPair(metrics, "生成代次", w.generation);
-    detailPair(metrics, "模型调用", w.model_calls);
-    detailPair(metrics, "输入 / 输出 Token", `${formatNumber(w.input_tokens)} / ${formatNumber(w.output_tokens)}`);
-    detailPair(metrics, "运行时长", `${formatNumber(w.runtime_seconds)} 秒`);
-    detailPair(metrics, "修复轮次", w.fix_rounds);
-    detailPair(metrics, "PR / 分支", [w.pr ? `#${w.pr}` : "无 PR", w.branch].filter(Boolean).join(" · "));
-    detailPair(metrics, "Base / Head", [w.base_sha, w.head_sha].filter(Boolean).join(" / "));
-    const gateIsForCurrentHead = !w.check_sha || w.check_sha.toLowerCase() === String(w.head_sha || "").toLowerCase();
-    detailPair(metrics, "GitHub 门禁", gateIsForCurrentHead
-      ? gateLabel(w.gate_status, w.gate_conclusion)
-      : "旧提交的门禁，当前提交尚未确认");
-    detailPair(metrics, "Check Run", [w.check_id ? `#${w.check_id}` : "", w.check_sha || ""].filter(Boolean).join(" · ") || "尚无 Check Run");
-    if (w.gate_confirmed_at && new Date(w.gate_confirmed_at).getTime() > 0) detailPair(metrics, "门禁最后确认", formatTime(w.gate_confirmed_at));
-    detailPair(metrics, "更新时间", formatTime(w.updated_at));
-    grid.append(detailSection("运行指标", null, metrics));
+    const tabs = el("nav", "detail-tabs");
+    const tabNames = { overview: "概况", development: "开发任务", review: "审查与发现", evidence: "证据" };
+    for (const [key, label] of Object.entries(tabNames)) {
+      const link = el("a", key === tab ? "active" : "", label);
+      link.href = `#/workflows/${encodeURIComponent(w.id)}/${key}`;
+      link.dataset.detailTab = key;
+      tabs.append(link);
+    }
+    const body = el("div", "detail-content");
+    body.id = "workflow-detail-content";
 
-    const tasks = el("div");
-    if (Array.isArray(w.tasks) && w.tasks.length) {
-      for (const task of w.tasks) {
+    const grid = el("div", "detail-grid");
+    if (tab === "overview") {
+      const metrics = el("ul", "detail-list");
+      detailPair(metrics, "模型调用", w.model_calls);
+      detailPair(metrics, "输入 / 输出 Token", `${formatNumber(w.input_tokens)} / ${formatNumber(w.output_tokens)}`);
+      detailPair(metrics, "运行时长", `${formatNumber(w.runtime_seconds)} 秒`);
+      detailPair(metrics, "修复轮次", w.fix_rounds);
+      detailPair(metrics, "PR / 分支", [w.pr ? `#${w.pr}` : "无 PR", w.branch].filter(Boolean).join(" · "));
+      detailPair(metrics, "Base / Head", [w.base_sha, w.head_sha].filter(Boolean).join(" / "));
+      const gateIsForCurrentHead = !w.check_sha || w.check_sha.toLowerCase() === String(w.head_sha || "").toLowerCase();
+      detailPair(metrics, "GitHub 门禁", gateIsForCurrentHead ? gateLabel(w.gate_status, w.gate_conclusion) : "旧提交的门禁，当前提交尚未确认");
+      detailPair(metrics, "Check Run", [w.check_id ? `#${w.check_id}` : "", w.check_sha || ""].filter(Boolean).join(" · ") || "尚无 Check Run");
+      if (w.gate_confirmed_at && new Date(w.gate_confirmed_at).getTime() > 0) detailPair(metrics, "门禁最后确认", formatTime(w.gate_confirmed_at));
+      detailPair(metrics, "更新时间", formatTime(w.updated_at));
+      grid.append(detailSection("运行指标", null, metrics));
+      const spec = el("div", "proposal-content");
+      spec.append(el("h4", "", text(w.spec?.title, "当前规格")), el("p", "", text(w.spec?.description, "暂无规格说明")), el("strong", "subsection-title", "验收标准"), criteriaList(w.spec));
+      grid.append(detailSection(w.spec?.approved ? "已批准规格" : "当前规格（待批准）", w.spec?.criteria?.length || 0, spec));
+      if (w.last_error) grid.append(detailSection("最近错误", null, el("div", "error-box", w.last_error), true));
+    } else if (tab === "development") {
+      const tasks = el("div");
+      if (Array.isArray(w.tasks) && w.tasks.length) w.tasks.forEach(task => {
         const item = el("div", "item-card");
-        const title = el("strong", "");
-        title.append(document.createTextNode(`${text(task.id, "任务")} · `), statusBadge(task.status, taskLabel(task.status)));
-        item.append(title, el("p", "", `类型：${({code:"代码",verification:"验证",analysis:"分析"})[task.kind || "code"] || task.kind}`), el("p", "", task.description || "无任务描述"));
+        item.append(el("strong", "", `${text(task.id, "任务")} · ${taskLabel(task.status)}`));
+        item.append(el("p", "", `类型：${({code:"代码",verification:"验证",analysis:"分析"})[task.kind || "code"] || text(task.kind, "代码")} · ${text(task.description, "无任务描述")}`));
         if (task.paths?.length) item.append(el("p", "", `文件：${task.paths.join("、")}`));
         item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));
-        tasks.append(item);
-      }
-    } else tasks.append(el("p", "muted", "暂无任务记录。"));
-    grid.append(detailSection("任务", w.tasks?.length || 0, tasks));
-
-    const findings = el("div");
-    const found = w.review?.findings || [];
-    if (found.length) {
-      for (const finding of found) {
-        const item = el("div", "item-card");
-        const line = el("strong", "");
-        line.append(el("span", `finding-severity ${(finding.severity || "").toLowerCase()}`, text(finding.severity, "finding")), document.createTextNode(`${text(finding.id)} · ${text(finding.state)}`));
-        item.append(line, el("p", "", `${text(finding.path)}${finding.line ? `:${finding.line}` : ""} · ${text(finding.description)}`));
-        if (finding.expected || finding.actual) item.append(el("p", "", `预期：${text(finding.expected)}；实际：${text(finding.actual)}`));
-        findings.append(item);
-      }
-    } else findings.append(el("p", "muted", "暂无发现项。"));
-    grid.append(detailSection("审查发现", found.length, findings));
-
-    const evidence = el("div");
-    const evidenceItems = w.evidence || [];
-    if (evidenceItems.length) {
-      for (const itemData of evidenceItems) {
-        const item = el("div", "item-card");
-        item.append(el("strong", "", `${text(itemData.kind, "证据")} · ${formatTime(itemData.created_at)}`));
-        item.append(el("p", "", `${text(itemData.path)} · SHA256 ${text(itemData.hash)}`));
-        item.append(el("p", "", `Base ${text(itemData.base_sha)} → Head ${text(itemData.head_sha)}`));
-        const view = el("button", "button button-secondary evidence-open", "查看证据内容");
-        view.type = "button";
-        view.disabled = !itemData.id;
-        view.addEventListener("click", () => loadEvidence(w.id, itemData));
-        item.append(view);
-        evidence.append(item);
-      }
-    } else evidence.append(el("p", "muted", "暂无证据记录。"));
-    grid.append(detailSection("验证证据", evidenceItems.length, evidence));
-
-    const review = el("ul", "detail-list");
-    detailPair(review, "本地评审结论", w.review?.verdict);
-    detailPair(review, "评审理由", w.review?.reason);
-    detailPair(review, "验证通过", w.review?.verification_passed ? "是" : "否");
-    detailPair(review, "Skeptic 完成", w.review?.skeptic_complete ? "是" : "否");
-    const reviewContent = el("div");
-    reviewContent.append(review);
-    const reviewTasks = w.review?.tasks || [];
-    if (reviewTasks.length) {
-      reviewContent.append(el("h4", "subsection-title", `评审任务 · ${reviewTasks.length}`));
-      reviewTasks.forEach(task => {
-        const item = el("div", "item-card");
-        item.append(el("strong", "", `${text(task.id, "评审任务")} · ${taskLabel(task.status)}`));
-        item.append(el("p", "", text(task.description, "无任务说明")));
-        if (task.paths?.length) item.append(el("p", "", `覆盖文件：${task.paths.join("、")}`));
-        item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));
-        if (task.obligation_ids?.length) item.append(el("p", "", `对应义务：${task.obligation_ids.join("、")}`));
         if (task.report) item.append(el("pre", "inline-report", typeof task.report === "string" ? task.report : JSON.stringify(task.report, null, 2)));
-        reviewContent.append(item);
-      });
+        tasks.append(item);
+      }); else tasks.append(el("p", "muted", "暂无开发任务记录。"));
+      grid.append(detailSection("开发任务", w.tasks?.length || 0, tasks, true));
+    } else if (tab === "review") {
+      grid.append(detailSection("审查与发现", (w.review?.findings?.length || 0) + (w.review?.tasks?.length || 0), reviewContent(w), true));
+    } else if (tab === "evidence") {
+      const evidence = el("div");
+      renderEvidenceTable(w, evidence);
+      grid.append(detailSection("验证证据", Array.isArray(w.evidence) ? w.evidence.length : 0, evidence, true));
     }
-    reviewContent.append(el("h4", "subsection-title", "当前已批准规格的验收标准"), criteriaList(w.spec));
-    grid.append(detailSection("审查与验收", null, reviewContent));
-
-    if (w.proposal_spec) {
-      const proposal = el("div", "proposal-content");
-      proposal.append(el("p", "proposal-state", w.proposal_spec.approved ? "该提案已批准" : "此方案仍待批准；批准前与当前规格分开展示。"));
-      proposal.append(el("h4", "", text(w.proposal_spec.title, "未命名方案")));
-      proposal.append(el("p", "", text(w.proposal_spec.description, "暂无方案说明")));
-      proposal.append(el("strong", "subsection-title", "提案验收标准"), criteriaList(w.proposal_spec));
-      if (w.proposal_spec.non_goals?.length) proposal.append(el("p", "", `非目标：${w.proposal_spec.non_goals.join("；")}`));
-      grid.append(detailSection("待批准方案", w.proposal_spec.criteria?.length || 0, proposal, true));
-    }
-
-    if (w.last_error) {
-      const errorBox = el("div", "error-box", w.last_error);
-      grid.append(detailSection("最近错误", null, errorBox, true));
-    }
-    container.append(heading, grid);
+    body.append(grid);
+    container.append(heading, tabs, body);
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: scrollY, behavior: "auto" });
+      body.scrollTop = contentScrollTop;
+    });
   }
 
   async function sendCommand(workflow, command) {
@@ -456,8 +610,12 @@
     renderHealth(state.health);
     renderStats(state.workflows);
     renderOverview(state.workflows);
-    renderWorkflows(state.workflows);
     populateFilters(state.workflows);
+    if (state.route?.page === "workflows") renderWorkflows(state.workflows);
+    if (state.route?.page === "workflow-detail") {
+      renderWorkflowDetail(state.workflows.find(w => w.id === state.route.id), state.route.tab);
+    }
+    if (state.route?.page === "settings" && state.route.tab === "github") renderGitHubIdentifiers(state.config);
   }
 
   async function loadAudit(workflowID = $("#audit-workflow").value) {
@@ -650,6 +808,9 @@
     const repos = Array.isArray(config?.repositories) ? config.repositories : [];
     const box = $("#github-identifiers");
     if (!box) return;
+    const signature = JSON.stringify({ github, repos });
+    if (signature === githubInfoSignature) return;
+    githubInfoSignature = signature;
     box.replaceChildren();
     const appID = github.app_id || 0;
     const installationID = github.installation_id || 0;
@@ -675,14 +836,13 @@
     try {
       const result = await api("/api/github/discover", { method: "POST", body: "{}" });
       const installations = Array.isArray(result?.installations) ? result.installations : [];
-      const picker = $("#installation-picker");
       const select = $("#installation-select");
       select.replaceChildren(new Option(installations.length ? "请选择安装" : "未发现安装", ""));
       installations.forEach(installation => {
         const account = installation.account?.login || "GitHub 账户";
         select.add(new Option(`${account} · Installation ${installation.id} · App ${installation.app_id}`, installation.id));
       });
-      picker.hidden = installations.length === 0;
+      $("#bind-installation").disabled = installations.length === 0;
       message.textContent = installations.length ? `发现 ${installations.length} 个安装。选择要授权给本服务的安装后再绑定。` : "当前 App 尚无可用安装；请先在 GitHub 安装 App 并选择仓库。";
     } catch (error) {
       message.textContent = `查询安装失败：${error.message}`;
@@ -709,14 +869,87 @@
     } finally { button.disabled = false; }
   }
 
-  function setView(name) {
-    for (const panel of $$(".view-panel")) panel.hidden = panel.dataset.panel !== name;
-    for (const button of $$(".nav-link")) button.classList.toggle("active", button.dataset.view === name);
-    const titles = { overview: "总览", workflows: "工作流", events: "事件审计", settings: "设置" };
-    $("#page-title").textContent = titles[name] || "总览";
-    if (name === "settings" && !state.settingsLoaded) loadSettings();
-    if (name === "events") loadAudit();
-    if (name === "workflows") renderWorkflows(state.workflows);
+  const workflowTabs = new Set(["overview", "development", "review", "evidence"]);
+  const settingsTabs = new Set(["model", "budget", "github"]);
+  const routeTitles = { dashboard: "仪表盘", workflows: "工作流列表", "workflow-detail": "工作流详情", events: "事件审计", settings: "设置" };
+
+  function parseRoute() {
+    const raw = location.hash.replace(/^#\/?/, "");
+    const parts = raw.split("/").filter(Boolean).map(part => {
+      try { return decodeURIComponent(part); } catch { return part; }
+    });
+    if (parts[0] === "workflows" && parts[1] && parts[1] !== "list") {
+      return { page: "workflow-detail", id: parts[1], tab: workflowTabs.has(parts[2]) ? parts[2] : "overview" };
+    }
+    if (parts[0] === "workflows") return { page: "workflows" };
+    if (parts[0] === "events") return { page: "events" };
+    if (parts[0] === "settings") return { page: "settings", tab: settingsTabs.has(parts[1]) ? parts[1] : "model" };
+    return { page: "dashboard" };
+  }
+
+  function navigate(path) {
+    const next = `#${path}`;
+    if (location.hash === next) applyRoute(true);
+    else location.hash = next;
+  }
+
+  function renderSettingsTab(tab) {
+    for (const pane of $$("[data-settings-panel]")) pane.hidden = pane.dataset.settingsPanel !== tab;
+    for (const link of $$("[data-settings-route]")) {
+      const active = link.dataset.settingsRoute === tab;
+      link.classList.toggle("active", active);
+      if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+    }
+  }
+
+  function setNavGroup(name, expanded) {
+    const group = $(`#${name}-nav-group`);
+    const toggle = $(`#${name}-nav-toggle`);
+    if (!group || !toggle) return;
+    group.classList.toggle("collapsed", !expanded);
+    toggle.setAttribute("aria-expanded", String(expanded));
+  }
+
+  function renderNavigation(route) {
+    const activeRoute = route.page === "dashboard" ? "/dashboard"
+      : route.page === "workflows" ? "/workflows/list"
+        : route.page === "events" ? "/events"
+          : route.page === "settings" ? `/settings/${route.tab}` : "";
+    for (const link of $$("[data-route]")) {
+      const active = link.dataset.route === activeRoute;
+      link.classList.toggle("active", active);
+      if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+    }
+    const isWorkflow = route.page === "workflows" || route.page === "workflow-detail";
+    $("#workflow-nav-toggle")?.classList.toggle("active", isWorkflow);
+    $("#settings-nav-toggle")?.classList.toggle("active", route.page === "settings");
+    if (isWorkflow) setNavGroup("workflow", true);
+    if (route.page === "settings") setNavGroup("settings", true);
+  }
+
+  function applyRoute(scroll = false) {
+    const previous = state.route;
+    const route = parseRoute();
+    state.route = route;
+    if (route.page === "workflow-detail") state.selected = route.id;
+    for (const panel of $$(".view-panel")) panel.hidden = panel.dataset.panel !== route.page;
+    const workflowTabNames = { overview: "概况", development: "开发任务", review: "审查与发现", evidence: "证据" };
+    $("#page-title").textContent = route.page === "workflow-detail"
+      ? `${routeTitles[route.page]} · ${workflowTabNames[route.tab]}` : routeTitles[route.page] || "仪表盘";
+    $("#detail-route-label").textContent = route.page === "workflow-detail"
+      ? ({ overview: "工作流概况", development: "开发任务", review: "审查与发现", evidence: "验证证据" })[route.tab] : "工作流详情";
+    renderNavigation(route);
+    if (route.page === "workflows") renderWorkflows(state.workflows);
+    if (route.page === "workflow-detail") renderWorkflowDetail(state.workflows.find(w => w.id === route.id), route.tab);
+    if (route.page === "settings") {
+      renderSettingsTab(route.tab);
+      if (!state.settingsLoaded) loadSettings();
+      if (route.tab === "github") renderGitHubIdentifiers(state.config);
+    }
+    if (route.page === "events" && previous?.page !== "events") loadAudit();
+    if (scroll && (previous?.page !== route.page || previous?.id !== route.id || previous?.tab !== route.tab)) {
+      window.scrollTo({ top: 0, behavior: "auto" });
+    }
   }
 
   function wireEvents() {
@@ -728,8 +961,17 @@
       try { await login(token); }
       catch (reason) { error.textContent = reason.message; $("#login-token").value = ""; }
     });
-    $$(".nav-link").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
-    $$("[data-go]").forEach(button => button.addEventListener("click", () => setView(button.dataset.go)));
+    $("#workflow-nav-toggle").addEventListener("click", () => setNavGroup("workflow", $("#workflow-nav-group").classList.contains("collapsed")));
+    $("#settings-nav-toggle").addEventListener("click", () => setNavGroup("settings", $("#settings-nav-group").classList.contains("collapsed")));
+    document.addEventListener("click", event => {
+      const link = event.target.closest("a[href]");
+      if (!link) return;
+      const url = new URL(link.href, location.href);
+      if (url.origin !== location.origin || !url.hash.startsWith("#/")) return;
+      event.preventDefault();
+      navigate(url.hash.slice(1));
+    });
+    window.addEventListener("hashchange", () => applyRoute(true));
     $("#refresh-button").addEventListener("click", refreshState);
     $("#workflow-search").addEventListener("input", () => renderWorkflows(state.workflows));
     $("#phase-filter").addEventListener("change", () => renderWorkflows(state.workflows));
@@ -747,6 +989,8 @@
   }
 
   wireEvents();
+  state.route = parseRoute();
+  applyRoute(false);
   showLogin();
   refreshState().then(() => {
     if (state.authenticated) startPolling();

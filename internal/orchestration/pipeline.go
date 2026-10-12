@@ -322,21 +322,41 @@ func (e *Engine) build(ctx context.Context, w *domain.Workflow) error {
 	payload := map[string]any{"changes": changes, "task_ids": ids, "message": fmt.Sprintf("Implement issue #%d tasks %s\n\nai-workflow action %s/%d", w.Issue, strings.Join(ids, ","), w.ID, w.Generation), "expected_parent": w.HeadSHA, "base_branch": w.BaseBranch, "base_sha": w.BaseSHA, "branch": w.Branch}
 	return e.Store.Save(ctx, w, store.NewAction(*w, "publish", payload), statusAction(*w))
 }
-func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, files map[string]sandbox.File) buildResult {
+func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, files map[string]sandbox.File) (res buildResult) {
 	task := w.Tasks[idx]
 	kind := taskKind(task)
-	res := buildResult{index: idx}
+	res = buildResult{index: idx}
 	id := fmt.Sprintf("%s-g%d-%s-e%d", w.ID, w.Generation, task.ID, task.LeaseEpoch)
 	ctx, cancel := context.WithTimeout(ctx, e.Config().AttemptTimeout())
 	defer cancel()
-	_ = e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "RUNNING", nil, nil)
+	var session *toolSession
+	defer func() {
+		if session != nil {
+			res.evidence = mergeEvidence(res.evidence, session.listEvidence())
+		}
+		state := "OUTPUT_READY"
+		if res.err != nil {
+			state = "BLOCKED"
+		}
+		if err := e.finishTaskAttempt(context.WithoutCancel(ctx), id, w, task, state, res.report, res.evidence, res.err); err != nil {
+			if res.err == nil {
+				res.err = err
+			} else {
+				res.err = fmt.Errorf("%w (also failed to persist attempt status: %v)", res.err, err)
+			}
+		}
+	}()
+	if err := e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "RUNNING", nil, nil); err != nil {
+		res.err = err
+		return res
+	}
 	workspace, err := e.Sandbox.Create(ctx, id, files)
 	if err != nil {
 		res.err = err
 		return res
 	}
 	defer e.Sandbox.Destroy(context.Background(), workspace)
-	session := &toolSession{e: e, w: w, workspace: workspace, scope: task.Paths}
+	session = &toolSession{e: e, w: w, workspace: workspace, scope: task.Paths}
 	if kind != "code" {
 		session.baseFiles, res.err = e.source(ctx, w, w.BaseSHA)
 		if res.err != nil {
@@ -445,13 +465,42 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 			res.evidence = append(res.evidence, ev)
 		}
 	}
-	state := "OUTPUT_READY"
-	if res.err != nil {
-		state = "BLOCKED"
-	}
-	_ = e.Store.AttemptOwned(context.WithoutCancel(ctx), id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, state, res.report, res.evidence)
 	return res
 }
+
+func (e *Engine) finishTaskAttempt(ctx context.Context, id string, w domain.Workflow, task domain.Task, state string, report any, evidence []domain.Evidence, runErr error) error {
+	storedReport := report
+	if runErr != nil {
+		state = "BLOCKED"
+		storedReport = map[string]any{"report": report, "error": e.redact(runErr.Error())}
+	}
+	if err := e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, state, storedReport, evidence); err != nil {
+		if runErr != nil {
+			return err
+		}
+		failure := fmt.Errorf("persist successful attempt status: %w", err)
+		blockedReport := map[string]any{"report": report, "error": e.redact(failure.Error())}
+		if fallbackErr := e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "BLOCKED", blockedReport, evidence); fallbackErr != nil {
+			return fmt.Errorf("%w; persist blocked status: %v", failure, fallbackErr)
+		}
+		return failure
+	}
+	return nil
+}
+
+func mergeEvidence(existing, additional []domain.Evidence) []domain.Evidence {
+	seen := make(map[string]bool, len(existing)+len(additional))
+	out := make([]domain.Evidence, 0, len(existing)+len(additional))
+	for _, ev := range append(append([]domain.Evidence(nil), existing...), additional...) {
+		if ev.ID != "" && seen[ev.ID] {
+			continue
+		}
+		seen[ev.ID] = true
+		out = append(out, ev)
+	}
+	return out
+}
+
 func (e *Engine) verify(ctx context.Context, w *domain.Workflow) error {
 	files, pending, err := e.verificationSnapshot(ctx, w)
 	if err != nil {
@@ -738,17 +787,32 @@ type reviewReport struct {
 	Summary     string              `json:"summary"`
 }
 
-func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.Task, files map[string]sandbox.File, skeptic bool) (reviewReport, []domain.Evidence, error) {
+func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.Task, files map[string]sandbox.File, skeptic bool) (report reviewReport, ev []domain.Evidence, retErr error) {
 	id := fmt.Sprintf("%s-g%d-%s-e%d", w.ID, w.Generation, task.ID, task.LeaseEpoch)
 	ctx, cancel := context.WithTimeout(ctx, e.Config().AttemptTimeout())
 	defer cancel()
-	_ = e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "RUNNING", nil, nil)
+	var session *toolSession
+	defer func() {
+		if session != nil {
+			ev = mergeEvidence(ev, session.listEvidence())
+		}
+		if err := e.finishTaskAttempt(context.WithoutCancel(ctx), id, w, task, "ACCEPTED", report, ev, retErr); err != nil {
+			if retErr == nil {
+				retErr = err
+			} else {
+				retErr = fmt.Errorf("%w (also failed to persist attempt status: %v)", retErr, err)
+			}
+		}
+	}()
+	if err := e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "RUNNING", nil, nil); err != nil {
+		return reviewReport{}, nil, err
+	}
 	workspace, err := e.Sandbox.Create(ctx, id, files)
 	if err != nil {
 		return reviewReport{}, nil, err
 	}
 	defer e.Sandbox.Destroy(context.Background(), workspace)
-	session := &toolSession{e: e, w: w, workspace: workspace, review: true}
+	session = &toolSession{e: e, w: w, workspace: workspace, review: true}
 	baseFiles, err := e.baseSnapshot(ctx, w)
 	if err != nil {
 		return reviewReport{}, nil, err
@@ -762,7 +826,7 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 			}
 		}
 	}
-	report := reviewReport{Findings: []domain.Finding{}}
+	report = reviewReport{Findings: []domain.Finding{}}
 	if e.Config().Runner.Mode == "fake" {
 		output, err := session.handler(ctx, "read_file", raw(map[string]string{"path": "calculator.go"}))
 		if err != nil {
@@ -785,7 +849,8 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 			prompt = skepticPrompt
 			input["peer_reports"] = w.Review.Tasks
 			input["findings"] = w.Review.Findings
-			input["evidence"] = w.Evidence
+			session.readableEvidence = skepticEvidence(w)
+			input["evidence"] = evidenceSummaries(session.readableEvidence)
 		}
 		validate := func(output json.RawMessage) error {
 			var candidate reviewReport
@@ -797,7 +862,11 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 			if err := json.Unmarshal(raw(w), &preview); err != nil {
 				return err
 			}
-			return mergeReport(&preview, candidate, task.ObligationIDs, session.listEvidence(), skeptic)
+			err := mergeReport(&preview, candidate, task.ObligationIDs, session.listEvidence(), skeptic)
+			if err != nil {
+				e.Store.Audit(context.WithoutCancel(ctx), w.ID, "report_rejected", map[string]any{"generation": w.Generation, "task_id": task.ID, "error": e.redact(err.Error())})
+			}
+			return err
 		}
 		out, err := e.ask(ctx, w, prompt, string(raw(input)), session.tools(), reviewSchema(), validate)
 		if err != nil {
@@ -816,8 +885,7 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 			return report, session.listEvidence(), fmt.Errorf("review modified candidate source %s", change.Path)
 		}
 	}
-	ev := session.listEvidence()
-	_ = e.Store.AttemptOwned(context.WithoutCancel(ctx), id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "ACCEPTED", report, ev)
+	ev = session.listEvidence()
 	return report, ev, nil
 }
 func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evidence []domain.Evidence, skeptic bool) error {

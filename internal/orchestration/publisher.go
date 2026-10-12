@@ -309,6 +309,67 @@ func (e *Engine) issueComment(ctx context.Context, w domain.Workflow, commentID 
 	return e.Command(ctx, w.ID, actor, strings.TrimSpace(strings.TrimPrefix(trimmed, "/ai")))
 }
 
+func skepticCheckpointReady(w domain.Workflow, currentKey string) bool {
+	if w.Phase != "BLOCKED" || w.Review.Verdict == "OBSOLETE" || currentKey == "" || w.Review.Key != currentKey ||
+		!w.Review.VerificationPassed || w.Review.SkepticComplete || len(w.Review.Tasks) == 0 || !w.Spec.Approved {
+		return false
+	}
+	if w.Control != "ACTIVE" && w.Control != "PAUSED" {
+		return false
+	}
+	for _, task := range w.Review.Tasks {
+		if task.Status != "ACCEPTED" {
+			return false
+		}
+	}
+	return true
+}
+
+func sameSkepticCheckpoint(current, expected domain.Workflow, currentKey string) bool {
+	return current.Version == expected.Version && current.ID == expected.ID &&
+		current.RepositoryID == expected.RepositoryID && current.PR == expected.PR &&
+		current.Generation == expected.Generation && current.BaseSHA == expected.BaseSHA &&
+		current.HeadSHA == expected.HeadSHA && current.Spec.Digest == expected.Spec.Digest &&
+		current.Review.ID == expected.Review.ID && current.Review.Key == expected.Review.Key &&
+		skepticCheckpointReady(current, currentKey)
+}
+
+func (e *Engine) resumeSkepticCheckpoint(ctx context.Context, w domain.Workflow, oldKey string) error {
+	if !skepticCheckpointReady(w, oldKey) {
+		return errors.New("review checkpoint no longer matches the current candidate")
+	}
+	e.stop(w.ID)
+	next := w
+	next.Generation++
+	newKey := e.key(ctx, next)
+	var reviewerIDs []string
+	for _, task := range w.Review.Tasks {
+		reviewerIDs = append(reviewerIDs, task.ID)
+	}
+	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if !sameSkepticCheckpoint(*x, w, oldKey) {
+			return nil, errors.New("review checkpoint changed during resume; retry /ai resume")
+		}
+		x.Generation++
+		x.Control = "ACTIVE"
+		x.Phase = "REVIEWING"
+		x.Review.ID = fmt.Sprintf("%s-review-%d-%s", x.ID, x.Generation, x.HeadSHA)
+		x.Review.Key = newKey
+		x.Review.Verdict = "PENDING"
+		x.Review.Reason = "resuming skeptic review; accepted reviewer reports are reused"
+		x.LastError = ""
+		return []store.Action{gateAction(*x, false, x.Review.Reason), statusAction(*x)}, nil
+	})
+	if err != nil {
+		return err
+	}
+	e.Store.Audit(context.WithoutCancel(ctx), w.ID, "skeptic_checkpoint_resumed", map[string]any{
+		"old_key": oldKey, "new_key": newKey, "reused_reviewer_ids": reviewerIDs,
+		"generation": next.Generation,
+	})
+	return nil
+}
+
 // Command applies a maintainer command. Pass dashboard=true only after the local
 // dashboard has authenticated the caller; local fixture commands are dashboard-only.
 func (e *Engine) Command(ctx context.Context, workflowID, actor, command string, dashboard ...bool) error {
@@ -393,6 +454,10 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 		}
 		if refreshed.ProposalSpec == nil && normalizedIssueHash(refreshed.IssueBody) != refreshed.Spec.SourceHash {
 			return errors.New("the edited issue requires /ai accept before it can be resumed")
+		}
+		currentKey := e.key(ctx, refreshed)
+		if skepticCheckpointReady(refreshed, currentKey) {
+			return e.resumeSkepticCheckpoint(ctx, refreshed, currentKey)
 		}
 		return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 			x.Generation++

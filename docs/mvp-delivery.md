@@ -22,11 +22,15 @@
 
 可用命令包括 `/ai status`、`pause`、`resume`、`cancel`、`takeover`、`replan`、`review deep`、`reject`、`defer`。未授权或机器人评论不能执行维护者命令。配置变化会使旧验证失效；重新规划不会重置预算。
 
-控制台显示运行阶段和控制状态、Dev/Review 任务、验收条件、发现、证据正文、事件审计、Token 和调用用量。GitHub 门禁与本地评审结论分别显示；门禁 SHA 不匹配当前 HEAD 时明确标记旧结果。
+控制台采用参考 ARTEX 的浅色分组布局：全局侧栏保留工作流列表，选中工作流后进入独立详情页，通过概况、开发任务、审查与发现、证据页签切换。证据按 20 条分页并支持筛选，报告默认折叠；模型、预算与执行、GitHub 设置分开。Hash 路由支持刷新、返回和直达详情，状态轮询保留当前输入与筛选。页面显示运行阶段和控制状态、Dev/Review 任务、验收条件、发现、证据正文、事件审计、Token 和调用用量。GitHub 门禁与本地评审结论分别显示；门禁 SHA 不匹配当前 HEAD 时明确标记旧结果。
 
 ## 验证记录与范围
 
 - 本机 Fake 闭环和真实 GitHub App Fake 闭环已到 `AWAITING_MAINTAINER/PASS`，完成实际沙箱命令、Git 数据提交、PR、测试合并快照和 Check Run。试点 Fake PR 为 [#2](https://github.com/ycychome/ai-workflow-pilot/pull/2)，随后取消以释放仓库执行名额，取消会撤销门禁。
 - 真实 Responses 连通性已成功验证。首次真实任务 [Issue #3](https://github.com/ycychome/ai-workflow-pilot/issues/3) 产生 [PR #4](https://github.com/ycychome/ai-workflow-pilot/pull/4)，暴露非代码任务产物判定问题后已取消。修复增加 `code/analysis/verification` 类型、只读证据产物和计入原预算的瞬态连接重试。
-- 修复后使用同样需求 [Issue #5](https://github.com/ycychome/ai-workflow-pilot/issues/5) 重新运行真实 Dev/Review，最终结果在交付时补充。
+- 修复后 [Issue #5](https://github.com/ycychome/ai-workflow-pilot/issues/5) → [PR #6](https://github.com/ycychome/ai-workflow-pilot/pull/6) 已完成真实 Responses Dev、两个独立 Reviewer 和 Skeptic。11 项义务全部有证据，进入 `AWAITING_MAINTAINER/PASS`。HEAD 为 `f0dfa59c0019b8430282ff7cc2b94796625e054e`，验证的测试合并提交为 `bc5078014bbfb101c96c074e36b4f80835c9ccb1`；App Check Run `114855222944` 在该 HEAD 上已确认 `completed/success`。源码 diff 只有 Add 的一行修复，GitHub CI 成功；尚未人工合并。
 - Go 检查、编译、前端语法检查和关键实际闭环用于此次功能交付。按本次用户要求没有开展架构文档中的完整 T01–T28 故障矩阵、10任务模型基准或同预算审查效果对照；这些未标为通过。本交付不声称完成 Alpha 有效性评估或适合任意不可信生产代码。
+
+本次调试累计使用 174 次模型请求，包含之前的失败与重审，不能作为单个 Add 修复的性能基准。用量未重置；本机调试单 Issue 上限为 200、每日 500。已修复只读目录范围、模型报告校验反馈、快照重复下载，以及 Skeptic 无法读取证据正文的问题。预算或传输错误后的恢复，只有当前身份完全匹配、可信验证通过、Reviewer 全部完成且 Skeptic 未完成时才复用该检查点；代码、基线、规格或策略变化仍整轮重审。所有过期 Worker/Outbox 继续由 generation 和租约隔离，Skeptic 未完成不会 PASS。
+
+界面布局参考 [ARTEX 在线演示](https://artex-demo.vercel.app/) 的分组导航与独立页面组织，采用本项目原有实现，没有复制其 AGPL 源码。

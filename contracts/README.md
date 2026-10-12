@@ -99,6 +99,13 @@ an approved spec, the current key, completed verification and skeptic review,
 a non-empty fully evidenced obligations ledger covering every acceptance
 criterion, and no unresolved blocking finding.
 
+A blocked workflow can resume its unfinished Skeptic checkpoint only when
+its current verification identity matches exactly, trusted verification passed,
+and every Reviewer task is accepted. Resume advances generation and the
+verification key, preserves the accepted proofs, and audits the key transition;
+it never carries forward a completed Skeptic or PASS. Snapshot or policy changes
+continue to require a full review.
+
 The gate only authorizes publication of a successful check for the verified
 candidate. It does not merge a pull request. A Maintainer reviews and merges
 through GitHub's normal interface; a later base/head/spec/profile change
