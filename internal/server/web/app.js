@@ -6,8 +6,8 @@
   const phaseNames = {
     INTAKE: "待处理", TRIAGE: "需求分析", SPEC_READY: "待确认方案", PLANNING: "规划中", DEVELOPING: "开发中",
     VERIFYING: "验证中", REVIEWING: "审查中", WAITING_CONFIGURATION: "等待配置", NEEDS_INFO: "需要补充信息",
-    DEFERRED: "已暂缓", REJECT_PROPOSED: "方案已拒绝", CHANGES_REQUESTED: "待修复", BLOCKED: "受阻",
-    AWAITING_MAINTAINER: "待维护者合并", MERGED: "已合并"
+    DEFERRED: "已暂缓", REJECT_PROPOSED: "等待覆核的拒绝建议", REJECTED: "已拒绝", CHANGES_REQUESTED: "待修复", BLOCKED: "受阻",
+    READY: "待远端检查", AWAITING_MAINTAINER: "待维护者合并", MERGED: "已合并"
   };
   const controlNames = { ACTIVE: "可执行", PAUSING: "暂停中", PAUSED: "已暂停", CANCELLING: "取消中", CANCELLED: "已取消", TAKEOVER: "人工接管", HUMAN_OWNED: "人工控制", COMPLETED: "已完成" };
   const commandNames = {
@@ -483,6 +483,265 @@
     renderWorkflowDetail(workflow, tab);
   }
 
+  function flowStatus(w, node) {
+    const phase = w.phase || "";
+    const control = w.control || "";
+    const stage = ({ INTAKE: 0, WAITING_CONFIGURATION: 1, TRIAGE: 2, NEEDS_INFO: 2, REJECT_PROPOSED: 2,
+      REJECTED: 2, DEFERRED: 2, SPEC_READY: 3, PLANNING: 4, DEVELOPING: 5, CHANGES_REQUESTED: 5,
+      VERIFYING: 6, REVIEWING: 7, READY: 10, AWAITING_MAINTAINER: 10, MERGED: 11 })[phase] ??
+      (phase === "BLOCKED" ? (w.review?.verification_passed ? 7 : w.tasks?.length ? 5 : 2) : 0);
+    const cancelled = ["CANCELLING", "CANCELLED"].includes(control);
+    const terminalProposal = phase === "REJECT_PROPOSED";
+    const terminalStopped = ["REJECTED", "DEFERRED"].includes(phase);
+    const gateIsCurrent = Boolean(w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase());
+    const reviewCurrent = w.review?.verdict !== "OBSOLETE";
+    const reviewEligibleForGate = flowReviewEligibleForGate(w);
+    const remoteGatePassed = control === "ACTIVE" && gateIsCurrent && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() === "success";
+    const gatePassed = remoteGatePassed && reviewEligibleForGate;
+    const reviewerTasks = Array.isArray(w.review?.tasks) ? w.review.tasks : [];
+    const reviewersDone = reviewCurrent && reviewerTasks.length >= 2 && reviewerTasks.every(task => task.status === "ACCEPTED");
+    const firstIncomplete = reviewerTasks.findIndex(task => task.status !== "ACCEPTED");
+    const currentNode = phase === "WAITING_CONFIGURATION" ? "eligibility"
+      : phase === "INTAKE" ? "eligibility"
+        : ["TRIAGE", "NEEDS_INFO"].includes(phase) ? "triage"
+          : phase === "SPEC_READY" ? "spec"
+            : phase === "PLANNING" ? "plan"
+              : ["DEVELOPING", "CHANGES_REQUESTED"].includes(phase) ? (phase === "CHANGES_REQUESTED" ? "fix" : "build")
+                : phase === "VERIFYING" ? "verify"
+        : phase === "REVIEWING" ? (reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : firstIncomplete <= 1 ? (firstIncomplete === 1 ? "reviewer2" : "reviewer1") : "reviewer2")
+          : phase === "BLOCKED" ? (w.review?.verification_passed ? reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : "reviewer1" : w.tasks?.length ? "verify" : "plan")
+            : phase === "READY" ? "gate" : ["AWAITING_MAINTAINER", "MERGED"].includes(phase) ? "human" : terminalProposal ? "maintainer-review" : "";
+    let status = "pending";
+    const completedByStage = {
+      issue: true,
+      eligibility: stage >= 2 && phase !== "WAITING_CONFIGURATION",
+      triage: stage >= 3 || ["NEEDS_INFO", "REJECT_PROPOSED", "REJECTED", "DEFERRED"].includes(phase),
+      spec: Boolean(w.spec?.approved),
+      plan: stage >= 5,
+      build: stage >= 6,
+      verify: Boolean(w.review?.verification_passed) && reviewCurrent,
+      reviewer1: reviewerTasks[0]?.status === "ACCEPTED" && reviewCurrent,
+      reviewer2: reviewerTasks[1]?.status === "ACCEPTED" && reviewCurrent,
+      skeptic: Boolean(w.review?.skeptic_complete) && reviewCurrent,
+      gate: gatePassed,
+      human: phase === "MERGED",
+      merged: phase === "MERGED"
+    };
+    if (completedByStage[node]) status = "done";
+    if (node === "reviewer1" && reviewerTasks[0]?.status === "RUNNING") status = "active";
+    if (node === "reviewer2" && reviewerTasks[1]?.status === "RUNNING") status = "active";
+    if (node === "reviewer1" && reviewerTasks[0]?.status === "BLOCKED" || node === "reviewer2" && reviewerTasks[1]?.status === "BLOCKED") status = "blocked";
+    if (node === "skeptic" && phase === "REVIEWING" && reviewersDone && !w.review?.skeptic_complete) status = "active";
+    if (node === "gate" && gateIsCurrent && String(w.gate_status).toLowerCase() === "in_progress") status = "active";
+    if (node === currentNode && status !== "done") {
+      if (control === "PAUSED" || control === "PAUSING") status = "paused";
+      else if (control === "BLOCKED" || phase === "BLOCKED") status = "blocked";
+      else if (control === "HUMAN_OWNED") status = "human";
+      else if (cancelled) status = "cancelled";
+      else if (control === "ACTIVE") status = "active";
+    }
+    if (node === "maintainer-review" && terminalProposal) status = "active";
+    if (node === "hold" && phase === "WAITING_CONFIGURATION") status = control === "ACTIVE" ? "active" : "paused";
+    if (node === "needs-info" && phase === "NEEDS_INFO") status = control === "ACTIVE" ? "active" : "paused";
+    if (node === "fix" && phase === "CHANGES_REQUESTED") status = control === "ACTIVE" ? "active" : control === "PAUSED" ? "paused" : "pending";
+    if (node === "merged" && phase === "MERGED") status = "done";
+    if (cancelled && !completedByStage[node] && node === currentNode) status = "cancelled";
+    if ((terminalProposal || terminalStopped) && !["issue", "eligibility", "triage", "maintainer-review"].includes(node)) status = "pending";
+    if (gatePassed && node === "gate") status = "done";
+    if (node === "gate" && gateIsCurrent && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() !== "success") status = "blocked";
+    if (node === "gate" && w.check_sha && w.head_sha && !gateIsCurrent) status = "blocked";
+    if (node === "gate" && remoteGatePassed && !reviewEligibleForGate) status = "stale";
+    if (reviewCurrent === false && ["reviewer1", "reviewer2", "skeptic", "verify"].includes(node) &&
+        ((node === "reviewer1" && reviewerTasks[0]?.status === "ACCEPTED") ||
+          (node === "reviewer2" && reviewerTasks[1]?.status === "ACCEPTED") ||
+          (node === "skeptic" && w.review?.skeptic_complete) ||
+          (node === "verify" && w.review?.verification_passed))) status = "stale";
+    return status;
+  }
+
+  function renderWorkflowDiagram(w) {
+    const phase = w.phase || "";
+    const terminalProposal = phase === "REJECT_PROPOSED";
+    const section = el("section", "workflow-flow-section card");
+    const header = el("div", "flow-header");
+    const title = el("div");
+    title.append(el("h2", "", "工作流生命周期"), el("p", "muted", `${text(w.repository)} · Issue #${text(w.issue)} · Workflow ${text(w.id)} · 当前阶段：${phaseLabel(w.phase)}`));
+    const controlNotes = {
+      PAUSING: "正在暂停", PAUSED: "已暂停", BLOCKED: "受阻", CANCELLING: "正在取消",
+      CANCELLED: "已取消", HUMAN_OWNED: "人工控制", COMPLETED: "已完成"
+    };
+    const needsAttention = Boolean(controlNotes[w.control]) || w.phase === "BLOCKED";
+    const summary = el("div", "flow-state-summary");
+    summary.append(statusBadge("muted", `当前位置：${flowCurrentLabel(w)}`));
+    summary.append(statusBadge(needsAttention ? "BLOCKED" : "muted", controlNotes[w.control] || (w.phase === "BLOCKED" ? "流程受阻" : controlLabel(w.control))));
+    header.append(title, summary);
+    const scroller = el("div", "flow-scroll");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 1700 300");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `${w.repository} Issue ${w.issue} 工作流状态图：${phaseLabel(w.phase)}，${controlLabel(w.control)}`);
+    svg.classList.add("workflow-flow-svg");
+    const titleNode = document.createElementNS(svg.namespaceURI, "title");
+    titleNode.textContent = `${text(w.repository)} · Issue #${text(w.issue)} 生命周期`;
+    svg.append(titleNode);
+    const defs = document.createElementNS(svg.namespaceURI, "defs");
+    const marker = document.createElementNS(svg.namespaceURI, "marker");
+    marker.id = "workflow-flow-arrow";
+    marker.setAttribute("viewBox", "0 0 10 10"); marker.setAttribute("refX", "8"); marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "6"); marker.setAttribute("markerHeight", "6"); marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS(svg.namespaceURI, "path");
+    arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+    arrow.setAttribute("fill", "currentColor"); marker.append(arrow); defs.append(marker); svg.append(defs);
+
+    const x = { issue: 24, eligibility: 152, triage: 280, spec: 408, plan: 536, build: 664, verify: 792,
+      reviewer1: 920, reviewer2: 920, skeptic: 1048, gate: 1176, human: 1304, merged: 1432,
+      hold: 152, "needs-info": 280, "maintainer-review": 408, fix: 1176 };
+    const y = { issue: 68, eligibility: 68, triage: 68, spec: 68, plan: 68, build: 68, verify: 68,
+      reviewer1: 42, reviewer2: 132, skeptic: 87, gate: 87, human: 87, merged: 87,
+      hold: 208, "needs-info": 208, "maintainer-review": 208, fix: 208 };
+    const width = 112, height = 46;
+    const connector = (d, cls = "") => {
+      const path = document.createElementNS(svg.namespaceURI, "path");
+      path.setAttribute("d", d); path.setAttribute("class", `flow-connector ${cls}`.trim());
+      path.setAttribute("marker-end", "url(#workflow-flow-arrow)"); svg.append(path);
+    };
+    const centerY = key => y[key] + height / 2;
+    const right = key => x[key] + width;
+    const left = key => x[key];
+    const centerX = key => x[key] + width / 2;
+    const straight = (a, b) => connector(`M ${right(a)} ${centerY(a)} H ${left(b)}`);
+    const edgeLabel = (label, px, py) => {
+      const textNode = document.createElementNS(svg.namespaceURI, "text");
+      textNode.setAttribute("x", String(px)); textNode.setAttribute("y", String(py)); textNode.setAttribute("class", "flow-edge-label");
+      textNode.setAttribute("text-anchor", "middle"); textNode.textContent = label; svg.append(textNode);
+    };
+    [["issue", "eligibility"], ["eligibility", "triage"], ["triage", "spec"], ["spec", "plan"], ["plan", "build"], ["build", "verify"]].forEach(([a, b]) => straight(a, b));
+    edgeLabel("允许", 140, 58); edgeLabel("符合资格", 268, 58); edgeLabel("接受", 396, 58);
+    connector(`M ${right("verify")} ${centerY("verify")} H 895 V ${centerY("reviewer1")} H ${left("reviewer1")}`);
+    connector(`M 895 ${centerY("reviewer1")} V ${centerY("reviewer2")} H ${left("reviewer2")}`);
+    connector(`M ${right("reviewer1")} ${centerY("reviewer1")} H 1030 V ${centerY("skeptic")} H ${left("skeptic")}`);
+    connector(`M ${right("reviewer2")} ${centerY("reviewer2")} H 1030 V ${centerY("skeptic")} H ${left("skeptic")}`);
+    [["skeptic", "gate"], ["gate", "human"], ["human", "merged"]].forEach(([a, b]) => straight(a, b));
+    edgeLabel("审查完成", 1038, 76); edgeLabel("通过", 1296, 77); edgeLabel("维护者合并", 1424, 77);
+    connector(`M ${centerX("triage")} ${y.triage + height} V ${y["needs-info"]}`);
+    edgeLabel("需澄清", 350, 164);
+    connector(`M ${centerX("eligibility")} ${y.eligibility + height} V ${y.hold}`);
+    edgeLabel("否", 295, 160);
+    connector(`M ${left("needs-info")} ${centerY("needs-info")} H 260 V ${centerY("triage")} H ${left("triage")}`, "flow-loop");
+    connector(`M ${centerX("triage")} ${y.triage + height} V 182 H ${centerX("maintainer-review")} V ${y["maintainer-review"]}`);
+    edgeLabel("拒绝 / 延期建议", 397, 174);
+    connector(`M ${right("maintainer-review")} ${centerY("maintainer-review")} H ${centerX("spec")} V ${y.spec + height}`, "flow-loop");
+    connector(`M ${right("gate")} ${centerY("gate")} H 1296 V 182 H ${centerX("maintainer-review")} V ${y["maintainer-review"]}`);
+    edgeLabel("覆盖不足 / 争议", 850, 174);
+    connector(`M ${centerX("gate")} ${y.gate + height} V ${y.fix}`);
+    edgeLabel("需修改", 1260, 166);
+    connector(`M ${left("fix")} ${centerY("fix")} H 520 V 172 H ${centerX("plan")} V ${y.plan + height}`, "flow-loop");
+    connector(`M ${centerX("human")} ${y.human + height} V 284 H ${centerX("plan")} V ${y.plan + height}`, "flow-loop");
+    edgeLabel("修改", 970, 279);
+
+    const nodes = [
+      ["issue", "Issue 入口", "issue", "创建 / 更新"], ["eligibility", "授权与预算", "eligibility", "入队资格"],
+      ["triage", "需求确认", "triage", "Triage"], ["spec", "批准规格", "spec", w.spec?.approved ? "已批准" : w.proposal_spec ? "待确认提案" : "等待"],
+      ["plan", "开发计划", "plan", `${(w.tasks || []).length} 项任务`], ["build", "开发任务", "build", "Builder"],
+      ["verify", "可信验证", "verify", reviewMilestoneLabel(w, "verify")],
+      ["reviewer1", "Reviewer 1", "reviewer1", reviewMilestoneLabel(w, "reviewer1")],
+      ["reviewer2", "Reviewer 2", "reviewer2", reviewMilestoneLabel(w, "reviewer2")],
+      ["skeptic", "Skeptic", "skeptic", reviewMilestoneLabel(w, "skeptic")],
+      ["gate", "合并门禁", "gate", gatePassedLabel(w)], ["human", "待人工合并", "human", w.pr_ready ? "Ready for review" : "等待复核"],
+      ["merged", "已合并", "merged", phaseNames[w.phase] === "已合并" ? "已记录" : "待合并"],
+      ["hold", "记录 / 等待授权", "hold", phase === "WAITING_CONFIGURATION" ? "等待配置" : "未获准时不入队"],
+      ["needs-info", "补充信息", "needs-info", phase === "NEEDS_INFO" ? "等待回复" : "需求澄清分支"],
+      ["maintainer-review", "维护者覆核", "maintainer-review", terminalProposal ? phaseLabel(w.phase) : "争议 / 延期建议"],
+      ["fix", "修复 / 反证", "fix", phase === "CHANGES_REQUESTED" ? `第 ${number(w.fix_rounds)} 轮` : "回到计划"]
+    ];
+    const nodeLinks = { plan: "development", build: "development", verify: "evidence", reviewer1: "review", reviewer2: "review", skeptic: "review", gate: "review", fix: "development" };
+    for (const [key, label, statusKey, detail] of nodes) {
+      const group = document.createElementNS(svg.namespaceURI, "g");
+      group.setAttribute("class", `flow-node is-${flowStatus(w, statusKey)}`);
+      const status = flowStatus(w, statusKey);
+      const accessible = `${label}，${detail}，${({ done: "已完成", active: "当前步骤", pending: "待执行", paused: "已暂停", blocked: "受阻", human: "人工控制", cancelled: "已取消", stale: "历史 / 待重审" })[status] || status}`;
+      group.setAttribute("aria-label", accessible);
+      if (nodeLinks[key]) {
+        group.setAttribute("role", "link"); group.setAttribute("tabindex", "0"); group.dataset.flowTab = nodeLinks[key];
+        const go = () => navigate(`/workflows/${encodeURIComponent(w.id)}/${nodeLinks[key]}`);
+        group.addEventListener("click", go);
+        group.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); go(); } });
+      }
+      const nodeTitle = document.createElementNS(svg.namespaceURI, "title"); nodeTitle.textContent = accessible; group.append(nodeTitle);
+      const rect = document.createElementNS(svg.namespaceURI, "rect");
+      rect.setAttribute("x", String(x[key])); rect.setAttribute("y", String(y[key])); rect.setAttribute("width", String(width)); rect.setAttribute("height", String(height)); rect.setAttribute("rx", "8"); group.append(rect);
+      const textNode = document.createElementNS(svg.namespaceURI, "text"); textNode.setAttribute("x", String(centerX(key))); textNode.setAttribute("y", String(y[key] + 19)); textNode.setAttribute("text-anchor", "middle");
+      const labelLine = document.createElementNS(svg.namespaceURI, "tspan"); labelLine.setAttribute("x", String(centerX(key))); labelLine.setAttribute("class", "flow-node-label"); labelLine.textContent = label;
+      const detailLine = document.createElementNS(svg.namespaceURI, "tspan"); detailLine.setAttribute("x", String(centerX(key))); detailLine.setAttribute("dy", "15"); detailLine.setAttribute("class", "flow-node-detail"); detailLine.textContent = detail;
+      textNode.append(labelLine, detailLine); group.append(textNode); svg.append(group);
+    }
+    scroller.append(svg);
+    const note = el("p", "flow-note", flowStateNote(w));
+    const legend = el("div", "flow-legend");
+    [["done", "已完成"], ["active", "当前步骤"], ["pending", "待执行"], ["paused", "暂停中"], ["blocked", "受阻 / 待确认"], ["stale", "历史 / 待重审"], ["human", "人工控制"], ["cancelled", "已取消"]].forEach(([cls, label]) => {
+      const item = el("span", "flow-legend-item"); item.append(el("i", `flow-legend-dot is-${cls}`), el("span", "", label)); legend.append(item);
+    });
+    section.append(header, scroller, note, legend);
+    return section;
+  }
+
+  function gatePassedLabel(w) {
+    if (!w.check_sha || !w.head_sha) return "尚未确认";
+    if (w.check_sha.toLowerCase() !== w.head_sha.toLowerCase()) return "旧提交";
+    const remotePassed = w.control === "ACTIVE" && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() === "success";
+    if (remotePassed && flowReviewEligibleForGate(w)) return "成功";
+    if (remotePassed && w.review?.verdict === "OBSOLETE") return "远端通过 · 审查已过期";
+    if (remotePassed) return "远端通过 · 本地审查未确认";
+    return gateLabel(w.gate_status, w.gate_conclusion);
+  }
+
+  function flowReviewEligibleForGate(w) {
+    return w.review?.verdict === "PASS" && w.review?.verification_passed === true && w.review?.skeptic_complete === true &&
+      ["READY", "AWAITING_MAINTAINER"].includes(w.phase);
+  }
+
+  function reviewMilestoneLabel(w, node) {
+    const obsolete = w.review?.verdict === "OBSOLETE";
+    if (node === "verify") {
+      if (!w.review?.verification_passed) return "等待验证";
+      return obsolete ? "历史 · 待重审" : "已通过";
+    }
+    if (node === "skeptic") {
+      if (!w.review?.skeptic_complete) return "待反证";
+      return obsolete ? "历史 · 待重审" : "已完成";
+    }
+    const task = w.review?.tasks?.[node === "reviewer1" ? 0 : 1];
+    if (!task) return "待分配";
+    if (obsolete && task.status === "ACCEPTED") return "历史 · 待重审";
+    return taskLabel(task.status);
+  }
+
+  function flowCurrentLabel(w) {
+    const phase = w.phase;
+    if (w.review?.verdict === "OBSOLETE") return "审查待重做";
+    if (phase === "REVIEWING") {
+      const tasks = w.review?.tasks || [];
+      if (tasks.some(task => task.status !== "ACCEPTED")) return "Reviewer 审查";
+      if (!w.review?.skeptic_complete) return "Skeptic 反证";
+      return "等待门禁确认";
+    }
+    return ({ INTAKE: "入队资格", WAITING_CONFIGURATION: "等待授权 / 配置", TRIAGE: "需求确认", NEEDS_INFO: "等待需求补充",
+      SPEC_READY: "批准规格", PLANNING: "开发计划", DEVELOPING: "开发任务", CHANGES_REQUESTED: "修复 / 反证",
+      VERIFYING: "可信验证", READY: "远端门禁", AWAITING_MAINTAINER: "待维护者合并", MERGED: "已合并",
+      BLOCKED: "受阻", DEFERRED: "已暂缓", REJECT_PROPOSED: "维护者覆核", REJECTED: "已拒绝" })[phase] || phaseLabel(phase);
+  }
+
+  function flowStateNote(w) {
+    const control = { PAUSED: "该工作流已暂停。", PAUSING: "该工作流正在暂停。", BLOCKED: "该工作流受阻，未完成步骤保持待执行或受阻状态。", CANCELLING: "该工作流正在取消。", CANCELLED: "该工作流已取消，后续步骤没有被标记为完成。", HUMAN_OWNED: "该工作流由维护者接管。" }[w.control];
+    const phase = { NEEDS_INFO: "当前等待需求补充；收到回复后可回到需求确认。", DEFERRED: "该请求已暂缓，未批准的后续步骤仍为待执行。", REJECTED: "该请求已被拒绝，后续步骤保持待执行。", REJECT_PROPOSED: "拒绝或延期建议等待维护者覆核。", CHANGES_REQUESTED: "验证或审查要求修改；图中显示修复回路。", BLOCKED: "工作流受阻；图中未完成的步骤不会被标为成功。" }[w.phase];
+    const gateCurrent = w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase();
+    const review = w.review?.verdict === "OBSOLETE" ? "当前 Reviewer / Skeptic 结果已过期，显示为历史并待重审。" : "";
+    const gate = w.check_sha && !gateCurrent
+      ? "当前门禁对应旧提交，当前 head 尚未确认。"
+      : "门禁只有在当前 head 的远端 Check Run 成功、当前审查为 PASS、可信验证与 Skeptic 均完成且处于 READY / 待维护者合并时才显示成功。";
+    return [control, phase, review, gate].filter(Boolean).join(" ");
+  }
+
   function renderWorkflowDetail(w, tab = "overview") {
     const container = $("#workflow-detail");
     if (!w) {
@@ -552,6 +811,7 @@
 
     const grid = el("div", "detail-grid");
     if (tab === "overview") {
+      body.append(renderWorkflowDiagram(w));
       const metrics = el("ul", "detail-list");
       detailPair(metrics, "模型调用", w.model_calls);
       detailPair(metrics, "输入 / 输出 Token", `${formatNumber(w.input_tokens)} / ${formatNumber(w.output_tokens)}`);
