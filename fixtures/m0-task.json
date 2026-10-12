@@ -1,0 +1,19 @@
+{
+  "repository": "ycychome/test-repo-for-ai-test",
+  "preferred_github_account": "zymooll",
+  "project": "Tiny Greeting Service",
+  "issue_title": "M0 Spike: 将问候服务默认问候升级为 hello M0",
+  "authorized_label": "ai:m0",
+  "allowed_paths": ["greeting.txt"],
+  "acceptance_criteria": [
+    "greeting.txt 精确包含 hello M0 和一个换行",
+    "GET /api/greeting 返回状态 200 和 message=hello M0",
+    "GET /api/greeting?name=Codex 返回 message=hello M0, Codex!",
+    "GET /healthz 仍返回 status=ok",
+    "非法姓名参数仍返回 400，原有业务测试通过",
+    "仅完整且匹配当前版本的验证可发布 workflow/merge-gate success",
+    "最终合并由 Maintainer 执行"
+  ],
+  "non_goals": ["修改服务源码", "修改测试或 CI", "自动合并", "部署生产服务"],
+  "status": "prepared_locally_repository_access_pending"
+}
