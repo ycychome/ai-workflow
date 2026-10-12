@@ -787,7 +787,19 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 			input["findings"] = w.Review.Findings
 			input["evidence"] = w.Evidence
 		}
-		out, err := e.ask(ctx, w, prompt, string(raw(input)), session.tools(), reviewSchema())
+		validate := func(output json.RawMessage) error {
+			var candidate reviewReport
+			if err := json.Unmarshal(output, &candidate); err != nil {
+				return err
+			}
+			// Validation must not mutate the accepted ledger before the report is returned.
+			var preview domain.Workflow
+			if err := json.Unmarshal(raw(w), &preview); err != nil {
+				return err
+			}
+			return mergeReport(&preview, candidate, task.ObligationIDs, session.listEvidence(), skeptic)
+		}
+		out, err := e.ask(ctx, w, prompt, string(raw(input)), session.tools(), reviewSchema(), validate)
 		if err != nil {
 			return report, session.listEvidence(), err
 		}
@@ -827,7 +839,7 @@ func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evi
 	seen := map[string]bool{}
 	for _, o := range report.Obligations {
 		if !allowed[o.ID] || seen[o.ID] {
-			return errors.New("review reported unassigned or duplicate obligation")
+			return fmt.Errorf("review reported unassigned or duplicate obligation %q; return each assigned ID exactly once", o.ID)
 		}
 		seen[o.ID] = true
 		if o.Result != "satisfied" && o.Result != "failed" && o.Result != "unverified" {
