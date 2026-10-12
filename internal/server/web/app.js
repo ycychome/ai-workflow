@@ -589,17 +589,19 @@
     summary.append(statusBadge(needsAttention ? "BLOCKED" : "muted", controlNotes[w.control] || (phase === "BLOCKED" ? "流程受阻" : controlLabel(w.control))));
     header.append(title, summary);
 
+    const buildSvg = wide => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 620 1032");
+    svg.setAttribute("viewBox", wide ? "0 0 1280 700" : "0 0 620 1032");
     svg.setAttribute("role", "img");
     svg.setAttribute("aria-label", `${w.repository} Issue ${w.issue} 双团队工作流：Dev Team 交付候选 PR，Review Team 独立审查，${phaseLabel(w.phase)}，${controlLabel(w.control)}`);
-    svg.classList.add("workflow-flow-svg");
+    svg.classList.add("workflow-flow-svg", wide ? "workflow-flow-svg--wide" : "workflow-flow-svg--portrait");
     const titleNode = document.createElementNS(svg.namespaceURI, "title");
     titleNode.textContent = `${text(w.repository)} · Issue #${text(w.issue)} 双团队工作流`;
     svg.append(titleNode);
     const defs = document.createElementNS(svg.namespaceURI, "defs");
     const marker = document.createElementNS(svg.namespaceURI, "marker");
-    marker.id = "workflow-flow-arrow";
+    const markerId = `workflow-flow-arrow-${wide ? "wide" : "portrait"}`;
+    marker.id = markerId;
     marker.setAttribute("viewBox", "0 0 10 10"); marker.setAttribute("refX", "8"); marker.setAttribute("refY", "5");
     marker.setAttribute("markerWidth", "6"); marker.setAttribute("markerHeight", "6"); marker.setAttribute("orient", "auto-start-reverse");
     const arrow = document.createElementNS(svg.namespaceURI, "path");
@@ -619,10 +621,17 @@
       }
       svg.append(group);
     };
-    frame(12, 12, 596, 148, "flow-shared-frame", "外部参与与共用内核", "共享状态 / 策略 / 取消控制覆盖两队；Publisher 只执行受控写入。 ");
-    frame(12, 180, 596, 304, "flow-team-frame flow-dev-frame", "Dev Team", "可写独立源码副本；澄清回 Issue，拒绝 / 延期由 Maintainer 覆核。 ");
-    frame(12, 560, 596, 320, "flow-team-frame flow-review-frame", "Review Team", "只读候选快照，不修改 PR 源码。 ");
-    frame(12, 900, 596, 120, "flow-shared-frame flow-outcomes-frame", "Maintainer 控制最终结果", "只有人决定是否合并；争议和预算边界交由人工接管。 ");
+    if (wide) {
+      frame(12, 12, 1256, 144, "flow-shared-frame", "外部参与与共用内核", "共享状态 / 策略 / 取消控制覆盖两队；Publisher 只执行受控写入。");
+      frame(12, 180, 612, 360, "flow-team-frame flow-dev-frame", "Dev Team", "独立源码副本 · 串行集成 · 受控交付");
+      frame(656, 180, 612, 360, "flow-team-frame flow-review-frame", "Review Team", "冻结快照 · 双 Reviewer 并行 · Skeptic 与独立验证");
+      frame(12, 560, 1256, 132, "flow-shared-frame flow-outcomes-frame", "Maintainer 控制最终结果", "只有人决定是否合并；争议和预算边界交由人工接管。");
+    } else {
+      frame(12, 12, 596, 148, "flow-shared-frame", "外部参与与共用内核", "共享状态 / 策略 / 取消控制覆盖两队；Publisher 只执行受控写入。 ");
+      frame(12, 180, 596, 304, "flow-team-frame flow-dev-frame", "Dev Team", "可写独立源码副本；澄清回 Issue，拒绝 / 延期由 Maintainer 覆核。 ");
+      frame(12, 560, 596, 320, "flow-team-frame flow-review-frame", "Review Team", "只读候选快照，不修改 PR 源码。 ");
+      frame(12, 900, 596, 120, "flow-shared-frame flow-outcomes-frame", "Maintainer 控制最终结果", "只有人决定是否合并；争议和预算边界交由人工接管。 ");
+    }
 
     const nodes = {
       github: { x: 20, y: 64, width: 250, height: 42, label: "GitHub · Issue / PR / Checks", detail: "评论 / CI / webhook", status: "context" },
@@ -647,6 +656,18 @@
       currentVersion: { x: 24, y: 952, width: 276, height: 56, label: "Gate 通过 → 当前版本复核 / 合并", detail: w.phase === "MERGED" ? "已记录实际合并" : w.pr_ready ? "PR 已 Ready for review" : "等待 Maintainer 决定", status: "human", tab: "review" },
       takeover: { x: 320, y: 952, width: 276, height: 56, label: "争议 / 覆盖不足 / 预算耗尽 → 接管", detail: w.control === "HUMAN_OWNED" ? "HUMAN_OWNED · 自动 Writer 停止" : "需由 Maintainer 处理", status: "takeover", tab: "review" }
     };
+    if (wide) {
+      const positions = {
+        github: [24, 62, 300, 42], maintainer: [956, 62, 288, 42], core: [388, 108, 504, 42],
+        eligibility: [20, 260, 132, 60], triage: [166, 260, 132, 60], spec: [312, 260, 132, 60], planner: [458, 260, 132, 60],
+        builder: [20, 410, 132, 60], integrate: [166, 410, 132, 60], candidate: [312, 410, 132, 60], fix: [458, 410, 132, 60],
+        snapshot: [670, 260, 132, 60], reviewPlanner: [816, 260, 132, 60], reviewDAG: [962, 260, 132, 60],
+        reviewer1: [1110, 402, 132, 34], reviewer2: [1110, 444, 132, 34], skeptic: [962, 410, 132, 60],
+        verification: [816, 410, 132, 60], gate: [670, 410, 132, 60],
+        currentVersion: [24, 622, 570, 56], takeover: [664, 622, 580, 56]
+      };
+      for (const [key, [x, y, width, height]] of Object.entries(positions)) Object.assign(nodes[key], { x, y, width, height });
+    }
     const centerX = key => nodes[key].x + nodes[key].width / 2;
     const centerY = key => nodes[key].y + nodes[key].height / 2;
     const left = key => nodes[key].x;
@@ -656,7 +677,7 @@
     const connector = (d, cls = "", arrowEnd = true) => {
       const path = document.createElementNS(svg.namespaceURI, "path");
       path.setAttribute("d", d); path.setAttribute("class", `flow-connector ${cls}`.trim());
-      if (arrowEnd) path.setAttribute("marker-end", "url(#workflow-flow-arrow)"); svg.append(path);
+      if (arrowEnd) path.setAttribute("marker-end", `url(#${markerId})`); svg.append(path);
     };
     const edgeLabel = (label, x, y) => {
       const textNode = document.createElementNS(svg.namespaceURI, "text");
@@ -667,6 +688,7 @@
     const forward = (a, b) => connector(`M ${right(a)} ${centerY(a)} H ${left(b)}`);
     const backward = (a, b) => connector(`M ${left(a)} ${centerY(a)} H ${right(b)}`);
 
+    if (!wide) {
     // Shared external/control strip; no third model team is implied.
     connector(`M ${centerX("github")} ${bottom("github")} V ${top("core")}`);
     connector(`M ${left("maintainer")} ${centerY("maintainer")} H ${right("github")}`);
@@ -704,6 +726,47 @@
     // Gate passes go to Maintainer review; uncertainty takes the independent takeover route.
     connector(`M 52 ${bottom("gate")} V 888 H 16 V ${centerY("currentVersion")} H ${left("currentVersion")}`);
     connector(`M 100 ${bottom("gate")} V 892 H 612 V ${centerY("takeover")} H ${right("takeover")}`);
+    } else {
+      // Shared strip: GitHub and Maintainer stay outside both independent teams.
+      connector(`M ${left("maintainer")} ${centerY("maintainer")} H ${right("github")}`);
+      edgeLabel("控制 / 当前版本复核", 638, 72);
+      connector(`M ${left("core")} ${centerY("core")} H 8 V ${centerY("eligibility")} H ${left("eligibility")}`);
+      edgeLabel("验签 / 授权通过", 92, 171);
+      connector(`M ${left("github")} ${centerY("github")} H 8 V ${centerY("core")} H ${left("core")}`);
+
+      // Dev Team: first row left-to-right; second row continues, with a bounded repair loop.
+      [["eligibility", "triage"], ["triage", "spec"], ["spec", "planner"], ["builder", "integrate"], ["integrate", "candidate"]].forEach(([a, b]) => forward(a, b));
+      connector(`M ${centerX("planner")} ${bottom("planner")} V 352 H 8 V ${centerY("builder")} H ${left("builder")}`);
+      edgeLabel("进入开发任务", 300, 382);
+      connector(`M ${right("fix")} ${centerY("fix")} H 600 V ${centerY("planner")} H ${right("planner")}`);
+      edgeLabel("修复后重新规划", 494, 370);
+
+      // The PR handoff uses the lower inter-team lane; it never crosses either team's nodes.
+      connector(`M ${centerX("candidate")} ${bottom("candidate")} V 550 H 640 V 446 M 640 434 V ${centerY("snapshot")} H ${left("snapshot")}`);
+      edgeLabel("候选 PR：固定 base / head / spec", 500, 531);
+      forward("snapshot", "reviewPlanner");
+      forward("reviewPlanner", "reviewDAG");
+
+      // Independent Reviewer fork/join on the Review Team's right side.
+      const forkX = 1248, joinX = 1100;
+      connector(`M ${right("reviewDAG")} ${centerY("reviewDAG")} H ${forkX}`, "", false);
+      connector(`M ${forkX} ${centerY("reviewDAG")} V ${centerY("reviewer2")}`, "", false);
+      for (const reviewer of ["reviewer1", "reviewer2"]) {
+        connector(`M ${forkX} ${centerY(reviewer)} H ${right(reviewer)}`);
+        connector(`M ${left(reviewer)} ${centerY(reviewer)} H ${joinX}`, "", false);
+      }
+      connector(`M ${joinX} ${centerY("reviewer1")} V ${centerY("reviewer2")}`, "", false);
+      connector(`M ${joinX} ${centerY("skeptic")} H ${right("skeptic")}`);
+      backward("skeptic", "verification");
+      backward("verification", "gate");
+
+      // Findings cross only the narrow space between team frames, targeting Dev's fix node.
+      connector(`M ${left("gate")} ${centerY("gate")} H 632 V 490 H ${centerX("fix")} V ${bottom("fix")}`, "flow-loop");
+      edgeLabel("Finding / 修复请求 → Dev", 736, 390);
+      // Gate outcomes leave Review for the Maintainer-controlled strip below both teams.
+      connector(`M 704 ${bottom("gate")} V 606 H ${centerX("currentVersion")} V ${top("currentVersion")}`);
+      connector(`M 764 ${bottom("gate")} V 614 H ${centerX("takeover")} V ${top("takeover")}`);
+    }
 
     const nodeStatusName = { done: "已完成", active: "当前步骤", pending: "待执行", paused: "已暂停", blocked: "受阻", human: "人工控制", cancelled: "已取消", stale: "历史 / 待重审", context: "共享组件" };
     for (const [key, node] of Object.entries(nodes)) {
@@ -731,7 +794,14 @@
       detail.setAttribute("dy", "15"); detail.setAttribute("class", "flow-node-detail"); detail.textContent = node.detail;
       textNode.append(label, detail); group.append(textNode); svg.append(group);
     }
-    const locatorTarget = () => phase === "MERGED" ? svg.querySelector('[data-flow-node="currentVersion"]') : svg.querySelector('.is-active, .is-paused, .is-blocked, .is-human, .is-cancelled');
+    return svg;
+    };
+    const diagramViewport = el("div", "flow-diagram-viewport");
+    diagramViewport.append(buildSvg(false), buildSvg(true));
+    const locatorTarget = () => {
+      const visibleSvg = Array.from(diagramViewport.querySelectorAll(".workflow-flow-svg")).find(node => node.getClientRects().length);
+      return phase === "MERGED" ? visibleSvg?.querySelector('[data-flow-node="currentVersion"]') : visibleSvg?.querySelector('.is-active, .is-paused, .is-blocked, .is-human, .is-cancelled');
+    };
     const locate = el("button", "text-button flow-locate", "定位当前步骤");
     locate.type = "button";
     locate.addEventListener("click", () => locatorTarget()?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }));
@@ -741,7 +811,7 @@
     [["done", "已完成"], ["active", "当前步骤"], ["pending", "待执行"], ["paused", "暂停中"], ["blocked", "受阻 / 待确认"], ["stale", "历史 / 待重审"], ["human", "人工控制"], ["cancelled", "已取消"]].forEach(([cls, label]) => {
       const item = el("span", "flow-legend-item"); item.append(el("i", `flow-legend-dot is-${cls}`), el("span", "", label)); legend.append(item);
     });
-    section.append(header, svg, note, legend);
+    section.append(header, diagramViewport, note, legend);
     return section;
   }
 
