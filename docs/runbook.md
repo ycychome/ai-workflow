@@ -75,6 +75,17 @@ separate terminal:
 scripts/tunnel.sh
 ```
 
+The launcher supervises the local allowlist proxy and cloudflared together.
+If the proxy exits, it is restarted without replacing the running tunnel URL.
+A port owned by an unrelated process causes startup to fail clearly. Stopping
+the supervisor stops its managed pair. For a background local run, create the
+data directory and launch with a log file:
+
+```sh
+mkdir -p data
+nohup scripts/tunnel.sh >data/tunnel-supervisor.log 2>&1 </dev/null &
+```
+
 The tunnel targets the local allowlist proxy. It forwards only `POST
 /webhooks/github` to the control service. Dashboard, health, settings, and App
 setup endpoints are not tunneled. Put the printed HTTPS URL plus
@@ -89,7 +100,11 @@ and set the App webhook endpoint to `https://<domain>/webhooks/github`.
 
 Use the dashboard to inspect workflow phase, control state, event audit, task
 reports, evidence, model usage, and review coverage. Pause or take over a
-workflow when review evidence is incomplete or uncertain. The service uses a
+workflow when review evidence is incomplete or uncertain. When an ACTIVE workflow
+asks for clarification (`NEEDS_INFO`), an authorized human Maintainer can reply
+directly on the Issue; no mention or extra command is needed to restart analysis.
+Replies never approve a proposed specification, unpause a workflow, or take it
+back from human ownership. Approve a resulting TaskSpec explicitly with `/ai accept`. The service uses a
 durable PostgreSQL database and `/data` volume, with a webhook Inbox and an
 external-effect Outbox for restart recovery and reconciliation. Inbox/Outbox
 processing is at least once; uncertain GitHub writes require reconciliation.

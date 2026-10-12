@@ -48,6 +48,11 @@ func statusAction(w domain.Workflow) store.Action {
 func statusBody(w domain.Workflow) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**AI workflow status:** `%s` · control `%s` · generation `%d`", w.Phase, w.Control, w.Generation)
+	if w.Phase == "NEEDS_INFO" && w.Control == "ACTIVE" {
+		b.WriteString("\n\n**下一步：** 维护者直接在本 Issue 回复补充信息即可，无需 @ bot。收到回复后会重新分析；回复不会自动批准开发规格。")
+	} else if w.Phase == "SPEC_READY" {
+		b.WriteString("\n\n**下一步：** 检查下方提议的规格和验收条件，确认后评论 `/ai accept`（或在控制台接受）开始开发。")
+	}
 	if w.LastError != "" {
 		fmt.Fprintf(&b, "\n\n%s", w.LastError)
 	}
@@ -89,10 +94,11 @@ func statusBody(w domain.Workflow) string {
 		}
 	}
 	if len(w.Evidence) > 0 {
-		b.WriteString("\n**Evidence**\n")
+		fmt.Fprintf(&b, "\n<details>\n<summary>Evidence · %d records</summary>\n\n", len(w.Evidence))
 		for _, ev := range w.Evidence {
 			fmt.Fprintf(&b, "- `%s` %s · %s · %s\n", ev.ID, ev.Kind, ev.Hash, ev.Path)
 		}
+		b.WriteString("\n</details>\n")
 	}
 	return b.String()
 }
@@ -313,8 +319,19 @@ func (e *Engine) issueComment(ctx context.Context, w domain.Workflow, commentID 
 		return nil
 	}
 	if !strings.HasPrefix(strings.ToLower(trimmed), "/ai ") && strings.ToLower(trimmed) != "/ai" {
+		if trimmed == "" {
+			return nil
+		}
+		maintainerReply := strings.EqualFold(actorType, "User") && w.Phase == "NEEDS_INFO" && e.authorized(ctx, w, actor, false)
 		return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 			x.Discussion = append(x.Discussion, fmt.Sprintf("%s: %s", actor, trimmed))
+			if resumeAfterClarification(*x, maintainerReply) {
+				x.Generation++
+				x.Phase = "TRIAGE"
+				x.ProposalSpec = nil
+				x.LastError = ""
+				return []store.Action{statusAction(*x)}, nil
+			}
 			return nil, nil
 		})
 	}
@@ -326,6 +343,10 @@ func (e *Engine) issueComment(ctx context.Context, w domain.Workflow, commentID 
 	}
 	ctx = store.WithCommand(ctx, fmt.Sprintf("github:%d:%d", w.RepositoryID, commentID))
 	return e.Command(ctx, w.ID, actor, strings.TrimSpace(strings.TrimPrefix(trimmed, "/ai")))
+}
+
+func resumeAfterClarification(w domain.Workflow, maintainerReply bool) bool {
+	return maintainerReply && w.AuthorizedBy != "" && w.Phase == "NEEDS_INFO" && w.Control == "ACTIVE"
 }
 
 func skepticCheckpointReady(w domain.Workflow, currentKey string) bool {
