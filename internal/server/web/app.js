@@ -60,6 +60,7 @@
   function number(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
   function phaseLabel(phase) { return phaseNames[phase] || text(phase, "未知阶段"); }
   function controlLabel(control) { return controlNames[control] || text(control, "未知"); }
+  function taskLabel(status) { return ({QUEUED:"待执行",RUNNING:"执行中",VALIDATED:"产物已验证",INTEGRATED:"已集成",ACCEPTED:"审查已完成",RETRY_WAIT:"等待重试",BLOCKED:"受阻",SUPERSEDED:"已替代"})[status] || text(status,"未知状态"); }
   function gateLabel(status, conclusion) {
     const statusCode = String(status || "").toLowerCase();
     const conclusionCode = String(conclusion || "").toLowerCase();
@@ -359,8 +360,8 @@
       for (const task of w.tasks) {
         const item = el("div", "item-card");
         const title = el("strong", "");
-        title.append(document.createTextNode(`${text(task.id, "任务")} · `), statusBadge(task.status, text(task.status)));
-        item.append(title, el("p", "", task.description || "无任务描述"));
+        title.append(document.createTextNode(`${text(task.id, "任务")} · `), statusBadge(task.status, taskLabel(task.status)));
+        item.append(title, el("p", "", `类型：${({code:"代码",verification:"验证",analysis:"分析"})[task.kind || "code"] || task.kind}`), el("p", "", task.description || "无任务描述"));
         if (task.paths?.length) item.append(el("p", "", `文件：${task.paths.join("、")}`));
         item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));
         tasks.append(item);
@@ -412,7 +413,7 @@
       reviewContent.append(el("h4", "subsection-title", `评审任务 · ${reviewTasks.length}`));
       reviewTasks.forEach(task => {
         const item = el("div", "item-card");
-        item.append(el("strong", "", `${text(task.id, "评审任务")} · ${text(task.status, "状态未知")}`));
+        item.append(el("strong", "", `${text(task.id, "评审任务")} · ${taskLabel(task.status)}`));
         item.append(el("p", "", text(task.description, "无任务说明")));
         if (task.paths?.length) item.append(el("p", "", `覆盖文件：${task.paths.join("、")}`));
         item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));

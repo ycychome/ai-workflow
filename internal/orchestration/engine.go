@@ -21,13 +21,14 @@ import (
 )
 
 type Engine struct {
-	Store   *store.Store
-	Sandbox *sandbox.Manager
-	mu      sync.RWMutex
-	cfg     config.Config
-	app     *gh.Client
-	active  map[string]context.CancelFunc
-	owner   string
+	Store     *store.Store
+	Sandbox   *sandbox.Manager
+	mu        sync.RWMutex
+	snapshots sourceSnapshotCache
+	cfg       config.Config
+	app       *gh.Client
+	active    map[string]context.CancelFunc
+	owner     string
 }
 
 func New(s *store.Store, c config.Config) (*Engine, error) {
@@ -332,15 +333,30 @@ func (e *Engine) source(ctx context.Context, w domain.Workflow, sha string) (map
 	if w.Repository == "local/pilot" {
 		return loadLocalSnapshot(e.Config().DataDir + "/fixtures/" + domain.Digest(w.ID)[:24])
 	}
-	c, owner, repo, err := e.client(ctx, w)
-	if err != nil {
-		return nil, err
+	if sha == "" {
+		return nil, errors.New("source snapshot requires an exact commit SHA")
 	}
-	b, err := c.GetArchive(ctx, owner, repo, sha)
-	if err != nil {
-		return nil, err
-	}
-	return decodeArchive(b)
+	key := w.Repository + "\x00" + sha
+	return e.snapshots.get(ctx, key, func() (map[string]sandbox.File, error) {
+		c, owner, repo, err := e.client(ctx, w)
+		if err != nil {
+			return nil, err
+		}
+		var archive []byte
+		for attempt := 0; ; attempt++ {
+			archive, err = c.GetArchive(ctx, owner, repo, sha)
+			if err == nil || attempt >= 2 || !retryableArchiveRead(ctx, err) {
+				break
+			}
+			if err := waitArchiveRetry(ctx, time.Duration(attempt+1)*time.Second); err != nil {
+				return nil, err
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		return decodeArchive(archive)
+	})
 }
 func localFiles() map[string]sandbox.File {
 	return map[string]sandbox.File{"go.mod": {Data: []byte("module pilot\n\ngo 1.24.0\n"), Mode: 0644}, "calculator.go": {Data: []byte("package pilot\n\nfunc Add(a, b int) int { return a - b }\n"), Mode: 0644}, "calculator_test.go": {Data: []byte("package pilot\nimport \"testing\"\nfunc TestAdd(t *testing.T) { if Add(2,3)!=5 { t.Fatal(\"Add must add\") } }\n"), Mode: 0644}}
