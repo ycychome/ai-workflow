@@ -24,6 +24,53 @@ type toolSession struct {
 	evidence  []domain.Evidence
 }
 
+func (e *Engine) plannerSession(ctx context.Context, w *domain.Workflow, role string) (*toolSession, func(), error) {
+	if w.BaseSHA == "" && w.Repository != "local/pilot" {
+		c, o, r, err := e.client(ctx, *w)
+		if err != nil {
+			return nil, nil, err
+		}
+		sha, err := c.GetBranchSHA(ctx, o, r, w.BaseBranch)
+		if err != nil {
+			return nil, nil, err
+		}
+		w.BaseSHA = sha
+	}
+	sha := w.HeadSHA
+	if sha == "" {
+		sha = w.BaseSHA
+	}
+	files, err := e.source(ctx, *w, sha)
+	if err != nil {
+		return nil, nil, err
+	}
+	workspace, err := e.Sandbox.Create(ctx, fmt.Sprintf("%s-g%d-%s", w.ID, w.Generation, role), files)
+	if err != nil {
+		return nil, nil, err
+	}
+	session := &toolSession{e: e, w: *w, workspace: workspace, review: true}
+	return session, func() { e.Sandbox.Destroy(context.Background(), workspace) }, nil
+}
+func (t *toolSession) readTools() []agent.Tool {
+	var out []agent.Tool
+	for _, tool := range t.tools() {
+		if tool.Name == "workflow_state" || tool.Name == "read_file" || tool.Name == "list_files" || tool.Name == "search" || tool.Name == "read_base_file" || tool.Name == "candidate_diff" {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+func (t *toolSession) verificationTools() []agent.Tool {
+	var out []agent.Tool
+	for _, tool := range t.tools() {
+		if tool.Name == "workflow_state" || tool.Name == "read_file" || tool.Name == "list_files" || tool.Name == "search" || tool.Name == "run" || tool.Name == "read_base_file" || tool.Name == "candidate_diff" {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
 func (t *toolSession) record(ctx context.Context, kind string, data any, command []string, code int) (domain.Evidence, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -61,6 +108,16 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 	}
 	m := t.e.Sandbox
 	switch name {
+	case "workflow_state":
+		// This projection comes from the control store, not model-written reports.
+		// The publisher has no merge operation; human_merge_required is supervisor policy.
+		tasks := make([]map[string]any, 0, len(current.Tasks))
+		for _, task := range current.Tasks {
+			tasks = append(tasks, map[string]any{"id": task.ID, "kind": taskKind(task), "status": task.Status, "integrated_sha": task.IntegratedSHA})
+		}
+		facts := map[string]any{"workflow_id": current.ID, "generation": current.Generation, "phase": current.Phase, "control": current.Control, "spec_approved": current.Spec.Approved, "dev_tasks": tasks, "pull_request": current.PR, "head_sha": current.HeadSHA, "human_merge_required": true, "runner_mode": t.e.Config().Runner.Mode}
+		ev, err := t.record(ctx, "SOURCE_ANALYSIS", facts, nil, 0)
+		return string(raw(map[string]any{"facts": facts, "evidence_id": ev.ID})), err
 	case "read_base_file":
 		f, ok := t.baseFiles[p.Path]
 		if !ok {
@@ -128,6 +185,7 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 func (t *toolSession) tools() []agent.Tool {
 	props := func(p map[string]any) json.RawMessage { return raw(object(p)) }
 	tools := []agent.Tool{
+		{Name: "workflow_state", Description: "Read independently recorded control state, Dev artifact/task completion, and human merge policy. Provides evidence for workflow process constraints, not source correctness", Parameters: props(map[string]any{}), Handler: t.handler},
 		{Name: "read_file", Description: "Read a source file and obtain immutable evidence ID", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
 		{Name: "list_files", Description: "List workspace files; path can be .", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
 		{Name: "search", Description: "Search source text and obtain evidence ID", Parameters: props(map[string]any{"query": str()}), Handler: t.handler},

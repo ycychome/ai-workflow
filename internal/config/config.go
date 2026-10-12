@@ -4,6 +4,7 @@ import (
 	"errors"
 	"gopkg.in/yaml.v3"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -136,7 +137,11 @@ func (c Config) Repository(name string) (Repository, bool) {
 	return Repository{}, false
 }
 func (c Config) ModelReady() bool {
-	return c.Model.BaseURL != "" && c.Model.TokenFile != "" && c.Model.Dev != "" && c.Model.Review != ""
+	if c.Model.BaseURL == "" || c.Model.TokenFile == "" || c.Model.Dev == "" || c.Model.Review == "" {
+		return false
+	}
+	b, err := os.ReadFile(c.Model.TokenFile)
+	return err == nil && strings.TrimSpace(string(b)) != ""
 }
 func (c Config) AttemptTimeout() time.Duration {
 	return time.Duration(c.Runner.AttemptMinutes) * time.Minute

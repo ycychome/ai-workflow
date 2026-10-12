@@ -32,7 +32,13 @@ func (e *Engine) triage(ctx context.Context, w *domain.Workflow) error {
 		report.Risk = "low"
 		report.Criteria = []domain.Criterion{{ID: "AC-01", Description: "Add returns the sum of two integers and existing tests pass"}}
 	} else {
-		out, err := e.ask(ctx, *w, triagePrompt, string(raw(map[string]any{"title": w.IssueTitle, "body": w.IssueBody, "discussion": w.Discussion, "previous_spec": w.Spec})), nil, triageSchema())
+		session, cleanup, err := e.plannerSession(ctx, w, "triage")
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		out, err := e.ask(ctx, *w, triagePrompt, string(raw(map[string]any{"title": w.IssueTitle, "body": w.IssueBody, "discussion": w.Discussion, "previous_spec": w.Spec})), session.readTools(), triageSchema())
+		w.Evidence = append(w.Evidence, session.listEvidence()...)
 		if err != nil {
 			return err
 		}
@@ -86,9 +92,15 @@ func (e *Engine) plan(ctx context.Context, w *domain.Workflow) error {
 		Tasks []domain.Task `json:"tasks"`
 	}
 	if e.Config().Runner.Mode == "fake" {
-		report.Tasks = []domain.Task{{ID: "repair-add", Description: "Fix Add to return a + b", Paths: []string{"calculator.go"}}}
+		report.Tasks = []domain.Task{{ID: "repair-add", Kind: "code", Description: "Fix Add to return a + b", Paths: []string{"calculator.go"}}}
 	} else {
-		out, err := e.ask(ctx, *w, devPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "findings": w.Review.Findings, "base_sha": w.BaseSHA, "head_sha": w.HeadSHA})), nil, planSchema())
+		session, cleanup, err := e.plannerSession(ctx, w, "dev-plan")
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		out, err := e.ask(ctx, *w, devPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "findings": w.Review.Findings, "base_sha": w.BaseSHA, "head_sha": w.HeadSHA})), session.readTools(), planSchema())
+		w.Evidence = append(w.Evidence, session.listEvidence()...)
 		if err != nil {
 			return err
 		}
@@ -183,15 +195,54 @@ func (e *Engine) build(ctx context.Context, w *domain.Workflow) error {
 			failed = true
 			continue
 		}
+		if taskKind(*t) != "code" {
+			if len(res.changes) != 0 {
+				t.Status = "RETRY_WAIT"
+				failed = true
+				reason = "read-only task modified the source snapshot"
+				continue
+			}
+			t.Status = "INTEGRATED"
+			t.IntegratedSHA = w.HeadSHA
+			continue
+		}
 		if len(res.changes) == 0 {
 			var report struct {
 				Rebuttals []struct {
-					FindingID, Argument string
-					Evidence            []string
+					FindingID string   `json:"finding_id"`
+					Argument  string   `json:"argument"`
+					Evidence  []string `json:"evidence"`
 				} `json:"rebuttals"`
 			}
 			_ = json.Unmarshal(res.report, &report)
 			if len(report.Rebuttals) > 0 {
+				valid := true
+				knownEvidence := map[string]bool{}
+				for _, ev := range res.evidence {
+					knownEvidence[ev.ID] = true
+				}
+				for _, rb := range report.Rebuttals {
+					found := false
+					for _, f := range w.Review.Findings {
+						if f.ID == rb.FindingID {
+							found = true
+						}
+					}
+					if !found || rb.Argument == "" || len(rb.Evidence) == 0 {
+						valid = false
+					}
+					for _, id := range rb.Evidence {
+						if !knownEvidence[id] {
+							valid = false
+						}
+					}
+				}
+				if !valid {
+					t.Status = "RETRY_WAIT"
+					failed = true
+					reason = "rebuttal lacks a known finding or independently recorded evidence"
+					continue
+				}
 				for _, rb := range report.Rebuttals {
 					for i := range w.Review.Findings {
 						f := &w.Review.Findings[i]
@@ -245,6 +296,7 @@ func (e *Engine) build(ctx context.Context, w *domain.Workflow) error {
 }
 func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, files map[string]sandbox.File) buildResult {
 	task := w.Tasks[idx]
+	kind := taskKind(task)
 	res := buildResult{index: idx}
 	id := fmt.Sprintf("%s-g%d-%s-e%d", w.ID, w.Generation, task.ID, task.LeaseEpoch)
 	ctx, cancel := context.WithTimeout(ctx, e.Config().AttemptTimeout())
@@ -257,17 +309,97 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 	}
 	defer e.Sandbox.Destroy(context.Background(), workspace)
 	session := &toolSession{e: e, w: w, workspace: workspace, scope: task.Paths}
+	if kind != "code" {
+		session.baseFiles, res.err = e.source(ctx, w, w.BaseSHA)
+		if res.err != nil {
+			return res
+		}
+	}
 	if e.Config().Runner.Mode == "fake" {
 		original := files["calculator.go"]
 		original.Data = []byte(strings.Replace(string(original.Data), "return a - b", "return a + b", 1))
 		res.err = e.Sandbox.WriteFile(ctx, workspace, "calculator.go", original)
 		res.report = raw(map[string]any{"summary": "Fixed Add in the deterministic fixture", "rebuttals": []any{}})
 	} else {
-		res.report, res.err = e.ask(ctx, w, builderPrompt, string(raw(map[string]any{"spec": w.Spec, "task": task, "integrated_sha": w.HeadSHA, "findings": w.Review.Findings})), session.tools(), builderSchema())
+		tools := session.tools()
+		schema := builderSchema()
+		if kind != "code" {
+			if kind == "verification" {
+				tools = session.verificationTools()
+			} else {
+				tools = session.readTools()
+			}
+			schema = nonCodeBuilderSchema()
+		}
+		res.report, res.err = e.ask(ctx, w, builderPrompt, string(raw(map[string]any{"spec": w.Spec, "task": task, "integrated_sha": w.HeadSHA, "findings": w.Review.Findings, "dependencies": dependencyReports(w, task)})), tools, schema)
 	}
 	res.evidence = session.listEvidence()
 	if res.err == nil {
 		res.changes, res.err = e.Sandbox.CollectChanges(ctx, workspace)
+	}
+	if res.err == nil && kind != "code" {
+		if len(res.changes) != 0 {
+			res.err = errors.New("read-only task modified its workspace")
+		} else {
+			var report struct {
+				Summary  string   `json:"summary"`
+				Result   string   `json:"result"`
+				Evidence []string `json:"evidence"`
+			}
+			if err := json.Unmarshal(res.report, &report); err != nil || strings.TrimSpace(report.Summary) == "" {
+				res.err = errors.New("read-only task report is invalid")
+			} else if report.Result != "satisfied" && report.Result != "failed" && report.Result != "unverified" {
+				res.err = errors.New("read-only task result must be satisfied, failed or unverified")
+			} else {
+				known := map[string]domain.Evidence{}
+				for _, ev := range session.listEvidence() {
+					known[ev.ID] = ev
+				}
+				if len(report.Evidence) == 0 {
+					res.err = errors.New("read-only task report must cite evidence from this run")
+				}
+				hasSourceEvidence, hasSuccessfulCheck := false, false
+				for _, id := range report.Evidence {
+					ev, ok := known[id]
+					if !ok {
+						res.err = fmt.Errorf("read-only task cites evidence not produced by this run: %s", id)
+						break
+					}
+					switch ev.Kind {
+					case "SOURCE_ANALYSIS":
+						hasSourceEvidence = true
+					case "TOOL_VERIFIED":
+						if ev.ExitCode != 0 {
+							res.err = fmt.Errorf("verification report cites unsuccessful tool evidence: %s", id)
+							break
+						}
+						hasSuccessfulCheck = true
+					default:
+						res.err = fmt.Errorf("read-only task cites unsupported evidence kind %s", ev.Kind)
+					}
+					if res.err != nil {
+						break
+					}
+				}
+				if res.err == nil && kind == "analysis" && !hasSourceEvidence {
+					res.err = errors.New("analysis task must cite actual source-analysis evidence")
+				}
+				if res.err == nil && report.Result != "satisfied" {
+					res.err = errors.New("non-code task did not report satisfied")
+				}
+				if res.err == nil && kind == "verification" && !hasSuccessfulCheck {
+					res.err = errors.New("verification task must cite a successful tool check from this run")
+				}
+				if res.err == nil {
+					ev, err := e.artifact(context.WithoutCancel(ctx), w, id+":non-code", "NON_CODE_ARTIFACT", map[string]any{"task_id": task.ID, "kind": kind, "head_sha": w.HeadSHA, "report": report, "evidence_ids": report.Evidence})
+					if err != nil {
+						res.err = err
+					} else {
+						res.evidence = append(res.evidence, ev)
+					}
+				}
+			}
+		}
 	}
 	if res.err == nil {
 		for _, c := range res.changes {
@@ -275,6 +407,14 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 				res.err = fmt.Errorf("actual artifact violates scope: %s", c.Path)
 				break
 			}
+		}
+	}
+	if res.err == nil && len(res.changes) > 0 {
+		ev, err := e.artifact(context.WithoutCancel(ctx), w, id+":source", "SOURCE_ARTIFACT", map[string]any{"generation": w.Generation, "lease_epoch": task.LeaseEpoch, "base_sha": w.HeadSHA, "changes": res.changes})
+		if err != nil {
+			res.err = err
+		} else {
+			res.evidence = append(res.evidence, ev)
 		}
 	}
 	state := "OUTPUT_READY"
@@ -299,6 +439,7 @@ func (e *Engine) verify(ctx context.Context, w *domain.Workflow) error {
 	}
 	defer e.Sandbox.Destroy(context.Background(), workspace)
 	r := e.repository(*w)
+	previousFindings := append([]domain.Finding(nil), w.Review.Findings...)
 	for n, command := range r.Verification {
 		result, runErr := e.Sandbox.Run(ctx, workspace, command, e.Config().AttemptTimeout())
 		result.Stdout = e.redact(result.Stdout)
@@ -316,6 +457,17 @@ func (e *Engine) verify(ctx context.Context, w *domain.Workflow) error {
 		ev.TestedCommitSHA = w.TestedSHA
 		ev.TestedTreeSHA = w.TestedTreeSHA
 		w.Evidence = append(w.Evidence, ev)
+		if code == 0 {
+			for i := range previousFindings {
+				f := &previousFindings[i]
+				if f.ID == "mechanical-"+fmt.Sprint(n) {
+					f.State = "RESOLVED"
+					f.Evidence = []string{ev.ID}
+					f.VerificationKey = e.key(ctx, *w)
+					f.History = append(f.History, "Trusted check passed on "+w.TestedSHA)
+				}
+			}
+		}
 		if code != 0 {
 			if runErr != nil || result.TimedOut || strings.Contains(result.Stdout+result.Stderr, "module lookup disabled by GOPROXY=off") {
 				return errors.New("verification infrastructure did not complete; repair or warm the runner image before resuming")
@@ -326,12 +478,23 @@ func (e *Engine) verify(ctx context.Context, w *domain.Workflow) error {
 				return errors.New(w.LastError)
 			}
 			w.FixRounds++
-			w.Review.Findings = []domain.Finding{{ID: "mechanical-" + fmt.Sprint(n), Severity: "high", Category: "test", Description: w.LastError, EvidenceType: "TOOL_VERIFIED", Evidence: []string{ev.ID}, State: "CONFIRMED", VerificationKey: w.Review.Key}}
+			w.Review.Findings = append(previousFindings, domain.Finding{ID: "mechanical-" + fmt.Sprint(n), Severity: "high", Category: "test", Description: w.LastError, Expected: "Trusted command exits with status 0", Actual: fmt.Sprintf("Command exited with status %d", code), Preconditions: "Current candidate under the trusted verification profile", EvidenceType: "TOOL_VERIFIED", Evidence: []string{ev.ID}, State: "CONFIRMED", VerificationKey: w.Review.Key})
 			w.Phase = "CHANGES_REQUESTED"
 			return e.Store.Save(ctx, w, gateAction(*w, false, w.LastError), statusAction(*w))
 		}
 	}
-	w.Review = domain.Review{ID: fmt.Sprintf("%s-review-%d-%s", w.ID, w.Generation, w.HeadSHA), Key: e.key(ctx, *w), VerificationPassed: true, Verdict: "RUNNING"}
+	key := e.key(ctx, *w)
+	for i := range previousFindings {
+		f := &previousFindings[i]
+		if f.VerificationKey != key {
+			f.History = append(f.History, "Reverification required after snapshot change: "+f.VerificationKey)
+			f.VerificationKey = key
+			f.State = "FIX_CANDIDATE"
+			f.Evidence = nil
+			f.EvidenceType = "MODEL_CLAIM"
+		}
+	}
+	w.Review = domain.Review{ID: fmt.Sprintf("%s-review-%d-%s", w.ID, w.Generation, w.HeadSHA), Key: key, Findings: previousFindings, VerificationPassed: true, Verdict: "RUNNING"}
 	w.Phase = "REVIEWING"
 	w.LastError = ""
 	return e.Store.Save(ctx, w, store.NewAction(*w, "ready", map[string]any{}), gateAction(*w, false, "independent review is running"), statusAction(*w))
@@ -361,7 +524,7 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 		if e.Config().Runner.Mode == "fake" {
 			w.Review.Obligations = baseline
 			for i := 0; i < e.Config().Runner.Reviewers; i++ {
-				t := domain.Task{ID: fmt.Sprintf("review-%d", i+1), Description: "Independent deterministic fixture review", Paths: []string{"**"}, Status: "QUEUED"}
+				t := domain.Task{ID: fmt.Sprintf("review-%d", i+1), Kind: "verification", Description: "Independent deterministic fixture review", Paths: []string{"**"}, Status: "QUEUED"}
 				for n, o := range baseline {
 					if n%e.Config().Runner.Reviewers == i {
 						t.ObligationIDs = append(t.ObligationIDs, o.ID)
@@ -396,9 +559,17 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 			if err = validatePlan(plan.Tasks); err != nil {
 				return err
 			}
+			for _, task := range plan.Tasks {
+				if task.Kind != "verification" {
+					return fmt.Errorf("review task %s must have kind verification", task.ID)
+				}
+			}
 			w.Review.Tasks = plan.Tasks
 			w.Review.Obligations = baseline
 			for i := range w.Review.Tasks {
+				if w.Review.Tasks[i].Kind == "" {
+					w.Review.Tasks[i].Kind = "verification"
+				}
 				w.Review.Tasks[i].Status = "QUEUED"
 			}
 			known := map[string]bool{}
@@ -494,7 +665,7 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 		}
 	}
 	if !w.Review.SkepticComplete {
-		task := domain.Task{ID: "skeptic", Description: "Challenge findings, counterevidence and omitted coverage", Paths: []string{"**"}}
+		task := domain.Task{ID: "skeptic", Kind: "verification", Description: "Challenge findings, counterevidence and omitted coverage", Paths: []string{"**"}}
 		for _, o := range w.Review.Obligations {
 			task.ObligationIDs = append(task.ObligationIDs, o.ID)
 		}
@@ -581,7 +752,7 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 		report.Summary = "Deterministic fixture source review completed"
 	} else {
 		prompt := reviewerPrompt
-		input := map[string]any{"spec": w.Spec, "task": task, "obligations": obligations, "verification_key": w.Review.Key}
+		input := map[string]any{"spec": w.Spec, "task": task, "obligations": obligations, "verification_key": w.Review.Key, "prior_findings": w.Review.Findings}
 		if skeptic {
 			prompt = skepticPrompt
 			input["peer_reports"] = w.Review.Tasks
@@ -655,7 +826,7 @@ func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evi
 		}
 	}
 	for _, f := range report.Findings {
-		if f.ID == "" {
+		if !skeptic || f.ID == "" {
 			f.ID = "F-" + domain.Digest([]any{f.Path, f.Line, f.Description})[:10]
 		}
 		if f.Description == "" || f.Expected == "" || f.Actual == "" || f.Preconditions == "" {

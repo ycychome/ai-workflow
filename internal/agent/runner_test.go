@@ -89,7 +89,7 @@ func TestRunPreservesOutputItemsAndSubmitsRawReport(t *testing.T) {
 }
 
 func TestIncompleteResponseNeverRunsTool(t *testing.T) {
-	var calls int
+	var calls, hooks int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintln(w, `{"id":"resp-1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]}`)
 	}))
@@ -99,13 +99,52 @@ func TestIncompleteResponseNeverRunsTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = runner.Run(context.Background(), Request{Input: json.RawMessage(`"x"`), MaxCalls: 1, MaxRequests: 1,
+		BeforeRequest: func(context.Context) error { hooks++; return nil },
 		Tools: []Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`), Handler: func(context.Context, string, json.RawMessage) (string, error) {
 			calls++
 			return "unexpected", nil
 		}}},
 	})
-	if err == nil || calls != 0 {
-		t.Fatalf("err=%v, calls=%d; incomplete response must be rejected before tools run", err, calls)
+	if err == nil || calls != 0 || hooks != 1 {
+		t.Fatalf("err=%v, calls=%d, hooks=%d; incomplete response must be rejected before tools run", err, calls, hooks)
+	}
+}
+
+func TestTransientHTTPRetryRunsBudgetHookForEveryAttempt(t *testing.T) {
+	var requests, hooks, calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch requests {
+		case 1:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintln(w, `{"error":{"message":"try again"}}`)
+		case 2:
+			_, _ = fmt.Fprintln(w, `{"id":"resp-1","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]}`)
+		case 3:
+			_, _ = fmt.Fprintln(w, `{"id":"resp-2","status":"completed","output":[{"type":"function_call","id":"fc_2","call_id":"call_2","name":"submit_report","arguments":"{\"ok\":true}"}]}`)
+		default:
+			t.Fatalf("unexpected request %d", requests)
+		}
+	}))
+	defer server.Close()
+	runner, err := NewRunner(Config{BaseURL: server.URL, Token: "token", Model: "model", MaxOutputTokens: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.Run(context.Background(), Request{
+		Input: json.RawMessage(`"x"`), MaxCalls: 1, MaxRequests: 3,
+		BeforeRequest: func(context.Context) error { hooks++; return nil },
+		Tools: []Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`), Handler: func(context.Context, string, json.RawMessage) (string, error) {
+			calls++
+			return "looked up", nil
+		}}},
+		ReportSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 || hooks != requests || calls != 1 || result.Requests != requests || string(result.Report) != `{"ok":true}` {
+		t.Fatalf("requests=%d hooks=%d calls=%d result=%+v", requests, hooks, calls, result)
 	}
 }
 

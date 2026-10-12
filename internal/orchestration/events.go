@@ -57,6 +57,27 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 		if err != nil {
 			return err
 		}
+	} else if w.Branch != "" {
+		found, findErr := c.FindPullRequestByHead(ctx, owner, repo, w.Branch, "")
+		if findErr != nil {
+			return findErr
+		}
+		if found != nil {
+			pr = *found
+		}
+	}
+	var gate *gh.CheckRun
+	if pr.Number > 0 && pr.Head.SHA != "" {
+		checks, checkErr := c.ListCheckRuns(ctx, owner, repo, pr.Head.SHA)
+		if checkErr != nil {
+			return checkErr
+		}
+		for i := range checks {
+			if checks[i].Name == "workflow/merge-gate" && checks[i].App.ID == e.Config().GitHub.AppID {
+				gate = &checks[i]
+				break
+			}
+		}
 	}
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 		if normalizedIssueHash(issue.Body) != normalizedIssueHash(x.IssueBody) {
@@ -69,14 +90,29 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.Discussion = append(x.Discussion, "Issue edit proposal detected during reconciliation.")
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
-		if issue.State == "closed" && x.PR == 0 && x.Control == "ACTIVE" {
+		if issue.State == "closed" && !pr.Merged && x.Control == "ACTIVE" {
 			x.Generation++
 			x.Control = "PAUSING"
 			x.LastError = "source issue was closed; maintainer must confirm whether work should continue"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
 		if x.PR == 0 {
-			return nil, store.ErrNoChange
+			if pr.Number == 0 {
+				return nil, store.ErrNoChange
+			}
+			x.PR = pr.Number
+			x.HeadSHA = pr.Head.SHA
+			x.BaseSHA = pr.Base.SHA
+			x.BaseBranch = pr.Base.Ref
+			x.PRReady = !pr.Draft
+			x.Generation++
+			x.Review.Verdict = "OBSOLETE"
+			if x.Spec.Approved && unfinishedDevelopment(x.Tasks) {
+				x.Phase = "DEVELOPING"
+			} else if x.Spec.Approved {
+				x.Phase = "VERIFYING"
+			}
+			return []store.Action{gateAction(*x, false, "recovered a previously published pull request"), statusAction(*x)}, nil
 		}
 		if pr.Merged {
 			if x.Phase == "MERGED" && x.Control == "COMPLETED" {
@@ -113,8 +149,18 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 				return nil, store.ErrNoChange
 			}
 			x.Generation++
+			x.HeadSHA = pr.Head.SHA
 			x.Control = "PAUSING"
 			x.LastError = "pull request head changed outside the current workflow generation"
+			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
+		}
+		if pr.Base.Ref != "" && pr.Base.Ref != x.BaseBranch {
+			x.Generation++
+			x.BaseBranch = pr.Base.Ref
+			x.BaseSHA = pr.Base.SHA
+			x.Control = "PAUSING"
+			x.Review.Verdict = "OBSOLETE"
+			x.LastError = "PR target branch changed; resume to verify the current target"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
 		if pr.Base.SHA != "" && x.BaseSHA != "" && pr.Base.SHA != x.BaseSHA {
@@ -122,9 +168,20 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.BaseSHA = pr.Base.SHA
 			x.Control = "ACTIVE"
 			x.Phase = "VERIFYING"
+			if unfinishedDevelopment(x.Tasks) {
+				x.Phase = "DEVELOPING"
+			}
 			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "base branch changed; candidate must be reverified"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
+		}
+		if gate != nil && x.HeadSHA == pr.Head.SHA && (x.CheckID != gate.ID || x.CheckSHA != pr.Head.SHA || x.GateStatus != gate.Status || x.GateConclusion != gate.Conclusion) {
+			x.CheckID = gate.ID
+			x.CheckSHA = pr.Head.SHA
+			x.GateStatus = gate.Status
+			x.GateConclusion = gate.Conclusion
+			x.GateConfirmedAt = time.Now().UTC()
+			return nil, nil
 		}
 		return nil, store.ErrNoChange
 	})

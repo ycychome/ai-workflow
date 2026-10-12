@@ -18,7 +18,11 @@ claimed until that has happened.
 
 ## Start locally
 
-Run on a machine with Docker and Docker Compose:
+The current local deployment runs on macOS with Colima (`ai-workflow` profile):
+PostgreSQL and the trusted control process run as Docker Compose services. The
+host exposes only `127.0.0.1:8080` and `127.0.0.1:8081`. Linux can use a local
+Docker Engine and Docker Compose directly. Run on a machine with Docker and
+Docker Compose:
 
 ```sh
 scripts/up.sh
@@ -28,9 +32,9 @@ Open the web dashboard at [http://127.0.0.1:8081](http://127.0.0.1:8081). The lo
 login token is stored in `secrets/dashboard-token`; `up.sh` keeps it in the
 file instead of printing it into chat. Enter it in the dashboard. Open **Settings**
 to save the Responses Base URL, Dev and Review model names, and API token. Saved
-settings persist locally; the browser never reads a saved token back. Doctor
-checks the real endpoint only after the service is configured, and skips any
-model call while required endpoint/token/model fields are absent.
+settings persist locally; the browser never reads a saved token back. The web
+diagnostic skips a model call in Fake mode and while required endpoint,
+token, Dev, or Review model fields are absent.
 
 Port 8080 is reserved for `/healthz`, `/readyz`, and `POST /webhooks/github`;
 the dashboard and GitHub App setup live on port 8081.
@@ -42,11 +46,15 @@ calls, select Fake mode and create the local demo.
 
 ## Connect GitHub
 
-Use the GitHub App setup button or open
+After signing in to the dashboard, use the GitHub App setup button or open
 [http://127.0.0.1:8081/setup](http://127.0.0.1:8081/setup). The manifest and
 callback flow creates and installs the App. Keep setup local. If GitHub needs
 to reach a local machine, `scripts/tunnel.sh` exposes only the webhook proxy's
 `POST /webhooks/github` route; it does not expose the dashboard or setup page.
+The Cloudflare quick-tunnel URL is temporary and can change when the tunnel
+process restarts; update the GitHub App webhook URL when it changes. For a
+fixed-domain server deployment, set the public webhook URL to that domain and
+update the App's webhook endpoint to `https://<domain>/webhooks/github`.
 
 The service writes checks and pull-request updates through a durable Outbox,
 reconciles webhook deliveries through an Inbox, and keeps PostgreSQL plus

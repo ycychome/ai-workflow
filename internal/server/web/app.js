@@ -9,7 +9,7 @@
     DEFERRED: "已暂缓", REJECT_PROPOSED: "方案已拒绝", CHANGES_REQUESTED: "待修复", BLOCKED: "受阻",
     AWAITING_MAINTAINER: "待维护者合并", MERGED: "已合并"
   };
-  const controlNames = { ACTIVE: "可执行", PAUSED: "已暂停", CANCELLED: "已取消", TAKEOVER: "人工接管", COMPLETED: "已完成" };
+  const controlNames = { ACTIVE: "可执行", PAUSING: "暂停中", PAUSED: "已暂停", CANCELLING: "取消中", CANCELLED: "已取消", TAKEOVER: "人工接管", HUMAN_OWNED: "人工控制", COMPLETED: "已完成" };
   const commandNames = {
     status: "刷新状态", pause: "暂停", resume: "继续", cancel: "取消", replan: "重新规划",
     "review deep": "深度审查", takeover: "人工接管", accept: "接受结果", reject: "拒绝结果", defer: "稍后处理"
@@ -60,6 +60,20 @@
   function number(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
   function phaseLabel(phase) { return phaseNames[phase] || text(phase, "未知阶段"); }
   function controlLabel(control) { return controlNames[control] || text(control, "未知"); }
+  function gateLabel(status, conclusion) {
+    const statusCode = String(status || "").toLowerCase();
+    const conclusionCode = String(conclusion || "").toLowerCase();
+    if (!statusCode && !conclusionCode) return "尚未确认";
+    const names = {
+      queued: "排队中", pending: "等待检查", in_progress: "检查进行中", completed: "检查已完成",
+      success: "成功", pass: "成功", failure: "失败", failed: "失败", error: "错误",
+      neutral: "中性", skipped: "已跳过", cancelled: "已取消", timed_out: "超时",
+      action_required: "需要处理", stale: "已过期", startup_failure: "启动失败"
+    };
+    const statusText = statusCode ? (names[statusCode] || text(status, "")) : "";
+    const conclusionText = conclusionCode ? (names[conclusionCode] || text(conclusion, "")) : "";
+    return [statusText, conclusionText].filter(Boolean).join(" · ");
+  }
   function formatTime(value) {
     if (!value) return "—";
     const date = new Date(value);
@@ -67,6 +81,9 @@
     return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
   }
   function formatNumber(value) { return new Intl.NumberFormat("zh-CN").format(number(value)); }
+  function formatEstimatedCost(value) {
+    return new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(value);
+  }
   function badgeClass(value) {
     if (["COMPLETED", "MERGED", "READY", "ACTIVE", "success", "satisfied", "RESOLVED"].includes(value)) return "badge-green";
     if (["DEVELOPING", "VERIFYING", "REVIEWING", "PLANNING", "TRIAGE"].includes(value)) return "badge-blue";
@@ -157,7 +174,7 @@
       const card = el("div", `health-item ${healthy ? "ok" : missing ? "bad" : "warn"}`);
       card.append(el("span", "health-icon", icons[key]));
       const copy = el("div");
-      const translated = typeof detail === "boolean" ? (detail ? "正常" : "未就绪") : ({ ok: "正常", healthy: "正常", ready: "就绪", configured: "已配置", not_configured: "未配置", fake_mode: "Fake 演示模式", unavailable: "不可用", error: "错误" }[code] || text(detail, "未知"));
+      const translated = typeof detail === "boolean" ? (detail ? "正常" : "未就绪") : ({ ok: "正常", healthy: "正常", available: "可用", ready: "就绪", configured: "已配置", not_configured: "未配置", fake_mode: "Fake 演示模式", unavailable: "不可用", error: "错误" }[code] || text(detail, "未知"));
       copy.append(el("strong", "", healthNames[key]), el("small", "", translated));
       if (typeof status === "string") card.title = status;
       card.append(copy, el("span", "health-status"));
@@ -168,14 +185,24 @@
   function renderStats(workflows) {
     const runnablePhases = new Set(["TRIAGE", "PLANNING", "DEVELOPING", "VERIFYING", "REVIEWING", "CHANGES_REQUESTED"]);
     const runnable = workflows.filter(w => w.control === "ACTIVE" && runnablePhases.has(w.phase)).length;
-    const completed = workflows.filter(w => ["AWAITING_MAINTAINER", "MERGED"].includes(w.phase) || w.control === "COMPLETED").length;
+    const completed = workflows.filter(w => w.phase === "MERGED" || w.control === "COMPLETED" || (w.phase === "AWAITING_MAINTAINER" && w.control === "ACTIVE" && w.review?.verdict === "PASS")).length;
     const errors = workflows.filter(w => Boolean(w.last_error) || ["FAILED", "BLOCKED"].includes(w.phase)).length;
     const calls = workflows.reduce((sum, w) => sum + number(w.model_calls), 0);
+    const inputTokens = workflows.reduce((sum, w) => sum + number(w.input_tokens), 0);
+    const outputTokens = workflows.reduce((sum, w) => sum + number(w.output_tokens), 0);
+    const totalTokens = inputTokens + outputTokens;
+    const budget = state.config?.budget || {};
+    const inputPrice = number(budget.input_price_per_million);
+    const outputPrice = number(budget.output_price_per_million);
+    // Config documents zero prices as unknown, so avoid presenting them as free usage.
+    const costText = inputPrice > 0 && outputPrice > 0
+      ? `估算成本 ${formatEstimatedCost(inputTokens * inputPrice / 1_000_000 + outputTokens * outputPrice / 1_000_000)}（按配置价格单位）`
+      : "成本单价未完整配置";
     const items = [
       ["工作流总数", workflows.length, "当前可见工作流", "▤"],
       ["可执行", runnable, "阶段可运行且控制状态为 ACTIVE", "◷"],
       ["待合并 / 已完成", completed, "等待维护者合并或已完成", "✓"],
-      ["模型调用", formatNumber(calls), "累计调用次数", "✦"]
+      ["Token 使用量", formatNumber(totalTokens), `${costText} · 输入 ${formatNumber(inputTokens)} / 输出 ${formatNumber(outputTokens)} · ${formatNumber(calls)} 次调用`, "✦"]
     ];
     const container = $("#stats-grid");
     container.replaceChildren();
@@ -218,7 +245,7 @@
       const calls = document.createElement("td"); calls.append(el("span", "numeric-cell", formatNumber(workflow.model_calls))); row.append(calls);
     }
     const updated = document.createElement("td"); updated.textContent = formatTime(workflow.updated_at); row.append(updated);
-    row.addEventListener("click", () => selectWorkflow(workflow.id));
+    row.addEventListener("click", () => { selectWorkflow(workflow.id); setView("workflows"); });
     return row;
   }
 
@@ -318,6 +345,12 @@
     detailPair(metrics, "修复轮次", w.fix_rounds);
     detailPair(metrics, "PR / 分支", [w.pr ? `#${w.pr}` : "无 PR", w.branch].filter(Boolean).join(" · "));
     detailPair(metrics, "Base / Head", [w.base_sha, w.head_sha].filter(Boolean).join(" / "));
+    const gateIsForCurrentHead = !w.check_sha || w.check_sha.toLowerCase() === String(w.head_sha || "").toLowerCase();
+    detailPair(metrics, "GitHub 门禁", gateIsForCurrentHead
+      ? gateLabel(w.gate_status, w.gate_conclusion)
+      : "旧提交的门禁，当前提交尚未确认");
+    detailPair(metrics, "Check Run", [w.check_id ? `#${w.check_id}` : "", w.check_sha || ""].filter(Boolean).join(" · ") || "尚无 Check Run");
+    if (w.gate_confirmed_at && new Date(w.gate_confirmed_at).getTime() > 0) detailPair(metrics, "门禁最后确认", formatTime(w.gate_confirmed_at));
     detailPair(metrics, "更新时间", formatTime(w.updated_at));
     grid.append(detailSection("运行指标", null, metrics));
 
@@ -368,7 +401,7 @@
     grid.append(detailSection("验证证据", evidenceItems.length, evidence));
 
     const review = el("ul", "detail-list");
-    detailPair(review, "评审结论", w.review?.verdict);
+    detailPair(review, "本地评审结论", w.review?.verdict);
     detailPair(review, "评审理由", w.review?.reason);
     detailPair(review, "验证通过", w.review?.verification_passed ? "是" : "否");
     detailPair(review, "Skeptic 完成", w.review?.skeptic_complete ? "是" : "否");

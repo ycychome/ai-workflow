@@ -95,22 +95,23 @@ func (c *Client) Doctor(ctx context.Context) error {
 	}
 	input, _ := json.Marshal("Reply with OK")
 	_, err := c.createResponse(ctx, responseRequest{
-		Model: c.model, Input: input, MaxOutputTokens: 4,
+		Model: c.model, Input: input, MaxOutputTokens: 1024,
 		Store: false, Background: false,
 	})
 	return err
 }
 
 type responseRequest struct {
-	Model           string          `json:"model"`
-	Instructions    string          `json:"instructions,omitempty"`
-	Input           json.RawMessage `json:"input"`
-	Tools           []apiTool       `json:"tools,omitempty"`
-	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
-	Store           bool            `json:"store"`
-	Background      bool            `json:"background"`
-	Stream          bool            `json:"stream,omitempty"`
-	Include         []string        `json:"include,omitempty"`
+	Model             string          `json:"model"`
+	Instructions      string          `json:"instructions,omitempty"`
+	Input             json.RawMessage `json:"input"`
+	Tools             []apiTool       `json:"tools,omitempty"`
+	MaxOutputTokens   int             `json:"max_output_tokens,omitempty"`
+	Store             bool            `json:"store"`
+	Background        bool            `json:"background"`
+	Stream            bool            `json:"stream,omitempty"`
+	Include           []string        `json:"include,omitempty"`
+	ParallelToolCalls bool            `json:"parallel_tool_calls"`
 }
 
 type apiTool struct {
@@ -152,6 +153,7 @@ func (c *Client) createResponse(ctx context.Context, payload responseRequest) (a
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "ai-workflow-mvp/0.1")
 	if c.stream || payload.Stream {
 		req.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -174,9 +176,12 @@ func (c *Client) createResponse(ctx context.Context, payload responseRequest) (a
 	if mediaType == "text/event-stream" {
 		result, err = readCompletedSSE(resp.Body)
 	} else {
-		data, readErr := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
 		if readErr != nil {
 			return zero, fmt.Errorf("agent: read Responses body: %w", readErr)
+		}
+		if len(data) > 16<<20 {
+			return zero, errors.New("agent: Responses JSON exceeds 16 MiB")
 		}
 		err = json.Unmarshal(data, &result)
 		if err != nil {
@@ -271,6 +276,9 @@ func readCompletedSSE(r io.Reader) (apiResponse, error) {
 			if err := flush(); err != nil {
 				return zero, err
 			}
+			if completed != nil {
+				return *completed, nil
+			}
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
@@ -295,7 +303,7 @@ func readCompletedSSE(r io.Reader) (apiResponse, error) {
 		return zero, err
 	}
 	if completed == nil {
-		return zero, errors.New("agent: Responses SSE stream ended before response.completed")
+		return zero, fmt.Errorf("agent: Responses SSE stream ended before response.completed: %w", io.ErrUnexpectedEOF)
 	}
 	return *completed, nil
 }

@@ -48,8 +48,12 @@ func (i *InstallationClient) GetCollaboratorPermission(ctx context.Context, owne
 	}
 	var result struct {
 		Permission string `json:"permission"`
+		RoleName   string `json:"role_name"`
 	}
 	err := i.request(ctx, http.MethodGet, "/repos/"+q(owner)+"/"+q(repo)+"/collaborators/"+q(username)+"/permission", nil, &result)
+	if result.RoleName != "" {
+		return result.RoleName, err
+	}
 	return result.Permission, err
 }
 

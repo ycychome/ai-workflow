@@ -1,7 +1,10 @@
 # Local MVP Runbook
 
-This guide runs the control service on one trusted local machine. The web
-dashboard and setup page bind to loopback on port 8081. Port 8080 serves only
+This guide runs the control service on one trusted local machine. The current
+macOS deployment uses the `ai-workflow` Colima profile, with PostgreSQL and the
+trusted control process running as Docker Compose services. Compose publishes
+8080 and 8081 only on host loopback. On Linux, use a local Docker Engine and
+Docker Compose. The dashboard is on port 8081. Port 8080 serves only
 `/healthz`, `/readyz`, and `POST /webhooks/github`; the optional tunnel
 exposes only that webhook route. Keep GitHub App credentials, model credentials,
 and the dashboard login token in the local `secrets/` directory; do not paste
@@ -23,12 +26,16 @@ is not printed as chat content. Open `http://127.0.0.1:8081` and enter the
 file's contents in the dashboard login form.
 
 The main service command is `control -config /secrets/config.yaml`. The optional
-diagnostic mode is `control -doctor -config /secrets/config.yaml`; it checks
-configured dependencies. The web **Run diagnostics** action uses the same
-configuration-aware checks. When the Responses endpoint, token, or both role
-models are unconfigured, doctor reports that state and skips the model request.
-The diagnostic only contacts the configured model service after the required
-fields are present.
+diagnostic mode is `control -doctor -config /secrets/config.yaml`; it checks the
+database, reports workflow and budget counts, checks whether configured GitHub
+App credentials are readable, and probes the Dev model when model settings are
+complete. The web **Run diagnostics** action has a different scope: it pings the
+database, queries GitHub App installations, probes the configured Dev model, and
+checks Docker and the runner image. The web diagnostic skips the model probe in
+Fake mode. CLI doctor does not use runner mode as a skip condition: if all model
+settings are present, it makes a small Dev-model request even when Fake mode is
+selected. Both skip that request when the endpoint, token, Dev model, or Review
+model is missing.
 
 ## Configure the model service
 
@@ -54,8 +61,9 @@ GitHub delivery has passed acceptance.
 
 ## GitHub App setup and webhook tunnel
 
-Use the **GitHub App registration** button, or open
-`http://127.0.0.1:8081/setup`. The manifest flow creates the App and returns to
+Sign in to the dashboard first, then use the **GitHub App registration** button
+or open `http://127.0.0.1:8081/setup`. An unauthenticated request to `/setup`
+redirects to the dashboard login. The manifest flow creates the App and returns to
 the local callback. Complete installation and repository authorization, then
 save the App ID, installation ID, private key, webhook secret, and selected
 repository in local configuration. Do not expose port 8081 publicly.
@@ -72,7 +80,10 @@ The tunnel targets the local allowlist proxy. It forwards only `POST
 setup endpoints are not tunneled. Put the printed HTTPS URL plus
 `/webhooks/github` into the GitHub App webhook configuration. Verify the
 delivery signature and a real test delivery before treating integration as
-ready.
+ready. This Cloudflare quick-tunnel URL is temporary and may change when the
+tunnel process restarts; update the GitHub App webhook URL after each change.
+For a fixed-domain server deployment, configure that domain as the public URL
+and set the App webhook endpoint to `https://<domain>/webhooks/github`.
 
 ## Control and merge
 
@@ -102,8 +113,11 @@ directory. Copy that directory to protected storage and record its timestamp.
 Restore requires the explicit destructive acknowledgement:
 
 ```sh
-scripts/restore.sh --yes backups/20261012T120000Z
+scripts/restore.sh --yes data/backups/20261012T115845Z
 ```
+
+The default backup root is `data/backups`; use the timestamped directory
+printed by the backup command if it differs from this example.
 
 Restore stops the control service, replaces the database and `/data`, and then
 restarts control. Confirm the selected backup before using `--yes`; after

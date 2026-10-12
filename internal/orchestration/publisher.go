@@ -223,7 +223,17 @@ func (e *Engine) handleInbox(ctx context.Context, x store.Inbox) error {
 		}
 		switch {
 		case x.Event == "issues" && event.Action == "edited":
-			return e.issueEdited(ctx, w, event.Issue)
+			c, o, r, err := e.client(ctx, w)
+			if err != nil {
+				return err
+			}
+			current, err := c.GetIssue(ctx, o, r, w.Issue)
+			if err != nil {
+				return err
+			}
+			return e.issueEdited(ctx, w, &current)
+		case x.Event == "issues" && (event.Action == "closed" || event.Action == "reopened"):
+			return e.reconcileOne(ctx, w)
 		case x.Event == "issue_comment" && event.Action == "created" && event.Comment != nil:
 			return e.issueComment(ctx, w, event.Comment.ID, event.Comment.User.Login, event.Comment.User.Type, event.Comment.Body)
 		default:
@@ -388,7 +398,9 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 			x.Generation++
 			x.Control = "ACTIVE"
 			x.LastError = ""
-			if x.PR > 0 && x.Spec.Approved {
+			if unfinishedDevelopment(x.Tasks) && x.Spec.Approved {
+				x.Phase = "DEVELOPING"
+			} else if x.PR > 0 && x.Spec.Approved {
 				x.Phase = "VERIFYING"
 			} else if x.Spec.Approved {
 				x.Phase = "PLANNING"
@@ -503,7 +515,15 @@ func (e *Engine) accept(ctx context.Context, w domain.Workflow, actor string) er
 }
 
 func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event gh.WebhookEvent) error {
-	pr := event.PullRequest
+	c, o, r, err := e.client(ctx, w)
+	if err != nil {
+		return err
+	}
+	latest, err := c.GetPullRequest(ctx, o, r, w.PR)
+	if err != nil {
+		return err
+	}
+	pr := &latest
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 		if pr.Merged {
 			if x.Phase == "MERGED" && x.Control == "COMPLETED" {
@@ -525,7 +545,7 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 			x.LastError = "pull request was closed without a confirmed merge"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
-		if event.Action == "converted_to_draft" || (pr.Draft && x.PRReady && x.Phase != "DEVELOPING") {
+		if (event.Action == "converted_to_draft" && pr.Draft) || (pr.Draft && x.PRReady && x.Phase != "DEVELOPING") {
 			if x.Control == "PAUSING" && !x.PRReady && strings.Contains(x.LastError, "converted to draft") {
 				return nil, store.ErrNoChange
 			}
@@ -541,14 +561,27 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 		}
 		if pr.Head.SHA != "" && x.HeadSHA != "" && pr.Head.SHA != x.HeadSHA {
 			x.Generation++
+			x.HeadSHA = pr.Head.SHA
 			x.Control = "PAUSING"
 			x.LastError = "pull request head changed outside this workflow; reconcile before continuing"
+			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
+		}
+		if pr.Base.Ref != "" && pr.Base.Ref != x.BaseBranch {
+			x.Generation++
+			x.BaseBranch = pr.Base.Ref
+			x.BaseSHA = pr.Base.SHA
+			x.Control = "PAUSING"
+			x.Review.Verdict = "OBSOLETE"
+			x.LastError = "PR target branch changed; resume to verify the current target"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
 		if pr.Base.SHA != "" && x.BaseSHA != "" && pr.Base.SHA != x.BaseSHA {
 			x.Generation++
 			x.BaseSHA = pr.Base.SHA
 			x.Phase = "VERIFYING"
+			if unfinishedDevelopment(x.Tasks) {
+				x.Phase = "DEVELOPING"
+			}
 			x.Control = "ACTIVE"
 			x.Review.Verdict = "OBSOLETE"
 			return []store.Action{gateAction(*x, false, "base branch changed; verification is stale"), statusAction(*x)}, nil
@@ -708,7 +741,7 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 	if d.Key != "" {
 		keySummary += "\n\nVerification key: " + d.Key
 	}
-	input := gh.CheckRunInput{Name: "workflow/merge-gate", HeadSHA: targetSHA, Status: "completed", Conclusion: "failure", DetailsURL: e.Config().GitHub.PublicURL, Output: gh.CheckOutput{Title: "AI workflow gate", Summary: keySummary}, Gate: true}
+	input := gh.CheckRunInput{Name: "workflow/merge-gate", HeadSHA: targetSHA, Status: "completed", Conclusion: "failure", DetailsURL: fmt.Sprintf("https://github.com/%s/pull/%d", current.Repository, current.PR), Output: gh.CheckOutput{Title: "AI workflow gate", Summary: keySummary}, Gate: true}
 	if d.Pass {
 		input.Conclusion = "success"
 	} else if strings.Contains(strings.ToLower(d.Reason), "in progress") {
@@ -769,12 +802,18 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 				if !d.Pass && x.HeadSHA == targetSHA {
 					x.CheckID = check.ID
 					x.CheckSHA = targetSHA
+					x.GateStatus = check.Status
+					x.GateConclusion = check.Conclusion
+					x.GateConfirmedAt = time.Now().UTC()
 					return nil, nil
 				}
 				return nil, store.ErrStale
 			}
 			x.CheckID = check.ID
 			x.CheckSHA = targetSHA
+			x.GateStatus = check.Status
+			x.GateConclusion = check.Conclusion
+			x.GateConfirmedAt = time.Now().UTC()
 			return nil, nil
 		})
 	}
@@ -1002,4 +1041,13 @@ func (e *Engine) publishFixture(ctx context.Context, w domain.Workflow, a store.
 		return receipt, updateErr, false
 	}
 	return receipt, nil, false
+}
+
+func unfinishedDevelopment(tasks []domain.Task) bool {
+	for _, task := range tasks {
+		if task.Status != "INTEGRATED" && task.Status != "SUPERSEDED" {
+			return true
+		}
+	}
+	return false
 }

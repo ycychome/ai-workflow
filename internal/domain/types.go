@@ -26,6 +26,7 @@ type Spec struct {
 }
 type Task struct {
 	ID            string          `json:"id"`
+	Kind          string          `json:"kind,omitempty"`
 	Description   string          `json:"description"`
 	Paths         []string        `json:"paths"`
 	DependsOn     []string        `json:"depends_on"`
@@ -85,44 +86,62 @@ type Review struct {
 	Reason             string       `json:"reason"`
 }
 type Workflow struct {
-	ID             string     `json:"id"`
-	RepositoryID   int64      `json:"repository_id"`
-	Repository     string     `json:"repository"`
-	InstallationID int64      `json:"installation_id"`
-	Issue          int        `json:"issue"`
-	Phase          string     `json:"phase"`
-	Control        string     `json:"control"`
-	Generation     int64      `json:"generation"`
-	Version        int64      `json:"version"`
-	AuthorizedBy   string     `json:"authorized_by"`
-	IssueTitle     string     `json:"issue_title"`
-	IssueBody      string     `json:"issue_body"`
-	Discussion     []string   `json:"discussion"`
-	Spec           Spec       `json:"spec"`
-	Tasks          []Task     `json:"tasks"`
-	ProposalSpec   *Spec      `json:"proposal_spec,omitempty"`
-	PR             int        `json:"pr"`
-	PRReady        bool       `json:"pr_ready"`
-	Branch         string     `json:"branch"`
-	BaseBranch     string     `json:"base_branch"`
-	BaseSHA        string     `json:"base_sha"`
-	HeadSHA        string     `json:"head_sha"`
-	TestedSHA      string     `json:"tested_sha,omitempty"`
-	TestedTreeSHA  string     `json:"tested_tree_sha,omitempty"`
-	CheckID        int64      `json:"check_id"`
-	CheckSHA       string     `json:"check_sha"`
-	Review         Review     `json:"review"`
-	Evidence       []Evidence `json:"evidence"`
-	FixRounds      int        `json:"fix_rounds"`
-	ModelCalls     int        `json:"model_calls"`
-	InputTokens    int64      `json:"input_tokens"`
-	OutputTokens   int64      `json:"output_tokens"`
-	RuntimeSeconds int64      `json:"runtime_seconds"`
-	LastError      string     `json:"last_error"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	CreatedAt      time.Time  `json:"created_at"`
-	LeaseOwner     string     `json:"lease_owner,omitempty"`
-	LeaseUntil     time.Time  `json:"lease_until,omitempty"`
+	ID              string     `json:"id"`
+	RepositoryID    int64      `json:"repository_id"`
+	Repository      string     `json:"repository"`
+	InstallationID  int64      `json:"installation_id"`
+	Issue           int        `json:"issue"`
+	Phase           string     `json:"phase"`
+	Control         string     `json:"control"`
+	Generation      int64      `json:"generation"`
+	Version         int64      `json:"version"`
+	AuthorizedBy    string     `json:"authorized_by"`
+	IssueTitle      string     `json:"issue_title"`
+	IssueBody       string     `json:"issue_body"`
+	Discussion      []string   `json:"discussion"`
+	Spec            Spec       `json:"spec"`
+	Tasks           []Task     `json:"tasks"`
+	ProposalSpec    *Spec      `json:"proposal_spec,omitempty"`
+	PR              int        `json:"pr"`
+	PRReady         bool       `json:"pr_ready"`
+	Branch          string     `json:"branch"`
+	BaseBranch      string     `json:"base_branch"`
+	BaseSHA         string     `json:"base_sha"`
+	HeadSHA         string     `json:"head_sha"`
+	TestedSHA       string     `json:"tested_sha,omitempty"`
+	TestedTreeSHA   string     `json:"tested_tree_sha,omitempty"`
+	CheckID         int64      `json:"check_id"`
+	CheckSHA        string     `json:"check_sha"`
+	GateStatus      string     `json:"gate_status"`
+	GateConclusion  string     `json:"gate_conclusion"`
+	GateConfirmedAt time.Time  `json:"gate_confirmed_at,omitempty"`
+	Review          Review     `json:"review"`
+	Evidence        []Evidence `json:"evidence"`
+	FixRounds       int        `json:"fix_rounds"`
+	ModelCalls      int        `json:"model_calls"`
+	InputTokens     int64      `json:"input_tokens"`
+	OutputTokens    int64      `json:"output_tokens"`
+	RuntimeSeconds  int64      `json:"runtime_seconds"`
+	LastError       string     `json:"last_error"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LeaseOwner      string     `json:"lease_owner,omitempty"`
+	LeaseUntil      time.Time  `json:"lease_until,omitempty"`
+}
+type GateDecision struct {
+	ID              string       `json:"id"`
+	WorkflowID      string       `json:"workflow_id"`
+	Generation      int64        `json:"generation"`
+	VerificationKey string       `json:"verification_key"`
+	SpecDigest      string       `json:"spec_digest"`
+	BaseSHA         string       `json:"base_sha"`
+	HeadSHA         string       `json:"head_sha"`
+	Verdict         string       `json:"verdict"`
+	Reason          string       `json:"reason"`
+	Evidence        []Evidence   `json:"evidence"`
+	Coverage        []Obligation `json:"coverage"`
+	Findings        []Finding    `json:"findings"`
+	CreatedAt       time.Time    `json:"created_at"`
 }
 
 func ID(repoID int64, issue int) string { return fmt.Sprintf("%d-%d", repoID, issue) }

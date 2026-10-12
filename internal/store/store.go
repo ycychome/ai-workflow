@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS inbox(id text PRIMARY KEY, event text NOT NULL,payloa
 CREATE TABLE IF NOT EXISTS outbox(id text PRIMARY KEY, workflow_id text NOT NULL REFERENCES workflows(id),generation bigint NOT NULL,kind text NOT NULL,data jsonb NOT NULL,state text NOT NULL DEFAULT 'pending',attempts integer NOT NULL DEFAULT 0,lease_until timestamptz,next_attempt timestamptz NOT NULL DEFAULT now(),receipt jsonb,error text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS attempts(id text PRIMARY KEY,workflow_id text NOT NULL REFERENCES workflows(id),intent_id text NOT NULL,generation bigint NOT NULL,lease_epoch bigint NOT NULL,state text NOT NULL,report jsonb,evidence jsonb,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS audit(id bigserial PRIMARY KEY,workflow_id text,kind text NOT NULL,data jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS gate_decisions(id text PRIMARY KEY,workflow_id text NOT NULL REFERENCES workflows(id),generation bigint NOT NULL,verification_key text NOT NULL,data jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS processed_commands(command_id text NOT NULL,workflow_id text NOT NULL REFERENCES workflows(id),created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(command_id,workflow_id));
 INSERT INTO schema_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
 `)
@@ -203,10 +204,64 @@ func (s *Store) List(ctx context.Context) ([]domain.Workflow, error) {
 	return out, rows.Err()
 }
 func (s *Store) Claim(ctx context.Context, owner string) (domain.Workflow, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return domain.Workflow{}, err
+	}
+	defer tx.Rollback(ctx)
+
 	var id string
-	e := s.DB.QueryRow(ctx, `WITH next AS(SELECT w.id FROM workflows w WHERE control='ACTIVE' AND phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED') AND (lease_until IS NULL OR lease_until<now()) AND NOT EXISTS(SELECT 1 FROM workflows other WHERE other.repository_id=w.repository_id AND other.id<>w.id AND other.lease_until>now()) AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.workflow_id=w.id AND o.kind IN('publish','gate','ready') AND o.state IN('pending','running','unknown','retry_wait')) ORDER BY updated_at FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE workflows SET lease_owner=$1,lease_until=now()+interval '90 seconds' FROM next WHERE workflows.id=next.id RETURNING workflows.id`, owner).Scan(&id)
-	if e != nil {
-		return domain.Workflow{}, e
+	var repositoryID int64
+	err = tx.QueryRow(ctx, `SELECT w.id,w.repository_id
+FROM workflows w
+WHERE w.control='ACTIVE'
+  AND w.phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')
+  AND (w.lease_until IS NULL OR w.lease_until<now())
+  AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.workflow_id=w.id AND o.kind IN('publish','gate','ready') AND o.state IN('pending','running','unknown','retry_wait'))
+ORDER BY w.updated_at
+FOR UPDATE OF w SKIP LOCKED
+LIMIT 1`).Scan(&id, &repositoryID)
+	if err != nil {
+		return domain.Workflow{}, err
+	}
+
+	var locked bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, repositoryID).Scan(&locked); err != nil {
+		return domain.Workflow{}, err
+	}
+	if !locked {
+		return domain.Workflow{}, pgx.ErrNoRows
+	}
+
+	// This statement gets a fresh READ COMMITTED snapshot after the advisory
+	// lock, so it also observes claims committed by another scheduler process
+	// while this transaction was choosing its candidate.
+	var blocked bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(
+  SELECT 1 FROM workflows other
+  WHERE other.repository_id=$1 AND other.id<>$2
+    AND (other.lease_until>now()
+      OR (other.phase='AWAITING_MAINTAINER' AND other.control NOT IN('CANCELLED','CANCELLING','COMPLETED')))
+)`, repositoryID, id).Scan(&blocked)
+	if err != nil {
+		return domain.Workflow{}, err
+	}
+	if blocked {
+		return domain.Workflow{}, pgx.ErrNoRows
+	}
+
+	tag, err := tx.Exec(ctx, `UPDATE workflows SET lease_owner=$2,lease_until=now()+interval '90 seconds'
+WHERE id=$1 AND repository_id=$3 AND control='ACTIVE'
+  AND phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')
+  AND (lease_until IS NULL OR lease_until<now())`, id, owner, repositoryID)
+	if err != nil {
+		return domain.Workflow{}, err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.Workflow{}, pgx.ErrNoRows
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Workflow{}, err
 	}
 	return s.Get(ctx, id)
 }
@@ -251,6 +306,16 @@ func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action)
 	if tag.RowsAffected() != 1 {
 		w.Version = old
 		return ErrStale
+	}
+	if w.Review.Key != "" && (w.Review.Verdict == "PASS" || w.Review.Verdict == "CHANGES_REQUESTED" || w.Review.Verdict == "BLOCKED") {
+		d := domain.GateDecision{ID: domain.Digest([]any{w.ID, w.Generation, w.Version, w.Review.Key, w.Review.Verdict}), WorkflowID: w.ID, Generation: w.Generation, VerificationKey: w.Review.Key, SpecDigest: w.Spec.Digest, BaseSHA: w.BaseSHA, HeadSHA: w.HeadSHA, Verdict: w.Review.Verdict, Reason: w.Review.Reason, Evidence: w.Evidence, Coverage: w.Review.Obligations, Findings: w.Review.Findings, CreatedAt: time.Now().UTC()}
+		payload, _ := json.Marshal(d)
+		if _, e = tx.Exec(ctx, "INSERT INTO gate_decisions(id,workflow_id,generation,verification_key,data) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", d.ID, w.ID, w.Generation, w.Review.Key, payload); e != nil {
+			return e
+		}
+		if _, e = tx.Exec(ctx, "INSERT INTO audit(workflow_id,kind,data) VALUES($1,'gate_decision',$2)", w.ID, payload); e != nil {
+			return e
+		}
 	}
 	if e = insertActions(ctx, tx, actions); e != nil {
 		return e

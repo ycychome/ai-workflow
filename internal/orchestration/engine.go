@@ -189,6 +189,10 @@ func (e *Engine) execute(ctx context.Context, w domain.Workflow, cancel context.
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				if metrics, err := e.Store.Get(ctx, w.ID); err == nil && metrics.RuntimeSeconds+int64(time.Since(started).Seconds()) >= int64(e.Config().Budget.IssueMinutes*60) {
+					cancel()
+					return
+				}
 				if e.Store.Renew(ctx, w) != nil {
 					cancel()
 					return
@@ -295,7 +299,8 @@ func (e *Engine) ask(ctx context.Context, w domain.Workflow, role, input string,
 		return nil, err
 	}
 	res, err := r.Run(ctx, agent.Request{System: role, Input: raw(input), Model: model, Tools: tools, ReportSchema: schema, MaxCalls: cfg.Budget.IssueCalls, MaxRequests: cfg.Budget.IssueCalls, BeforeRequest: func(c context.Context) error {
-		return e.Store.ReserveRequest(c, w.ID, w.Generation, cfg.Budget.IssueCalls, cfg.Budget.DailyCalls)
+		live := e.Config()
+		return e.Store.ReserveRequest(c, w.ID, w.Generation, live.Budget.IssueCalls, live.Budget.DailyCalls)
 	}, OnUsage: func(c context.Context, u agent.Usage) error {
 		return e.Store.Usage(c, w.ID, u.InputTokens, u.OutputTokens)
 	}})

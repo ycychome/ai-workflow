@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
+	"time"
 )
 
 // Tool is an agent-callable function. Parameters must be a JSON Schema object.
@@ -43,7 +46,7 @@ type Result struct {
 	Report     json.RawMessage
 	Usage      Usage
 	Calls      int // Number of ordinary tool handlers executed.
-	Requests   int // Number of Responses API requests completed.
+	Requests   int // Number of Responses API requests attempted.
 	ResponseID string
 }
 
@@ -76,8 +79,8 @@ func (r *Runner) Doctor(ctx context.Context) error {
 }
 
 // Run calls the model until it invokes submit_report. Tool calls are handled
-// serially and only after a complete response has been received. The call
-// budget also bounds API requests: at most MaxCalls+1 responses are requested.
+// serially and only after a complete response has been received. MaxRequests
+// bounds all HTTP attempts, including transient retries.
 func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	var result Result
 	if r == nil || r.client == nil {
@@ -101,24 +104,40 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return result, err
 	}
-	for requestNo := 0; requestNo < req.MaxRequests; requestNo++ {
+	requestsMade := 0
+	for requestsMade < req.MaxRequests {
 		input, err := json.Marshal(inputItems)
 		if err != nil {
 			return result, fmt.Errorf("agent: encode conversation input: %w", err)
 		}
-		if req.BeforeRequest != nil {
-			if err := req.BeforeRequest(ctx); err != nil {
-				return result, fmt.Errorf("agent: before request hook: %w", err)
+		var response apiResponse
+		retries := 0
+		for {
+			if requestsMade >= req.MaxRequests {
+				return result, fmt.Errorf("agent: request limit exhausted (%d) during transient retries", req.MaxRequests)
 			}
-		}
-		result.Requests++
-		response, err := r.client.createResponse(ctx, responseRequest{
-			Model: model, Instructions: req.System, Input: input,
-			Tools: apiTools, MaxOutputTokens: r.maxOutputTokens,
-			Store: false, Background: false,
-		})
-		if err != nil {
-			return result, err
+			if req.BeforeRequest != nil {
+				if err := req.BeforeRequest(ctx); err != nil {
+					return result, fmt.Errorf("agent: before request hook: %w", err)
+				}
+			}
+			requestsMade++
+			result.Requests++
+			response, err = r.client.createResponse(ctx, responseRequest{
+				Model: model, Instructions: req.System, Input: input,
+				Tools: apiTools, MaxOutputTokens: r.maxOutputTokens,
+				Store: false, Background: false,
+			})
+			if err == nil {
+				break
+			}
+			if retries >= 2 || !retryableResponseError(err) || requestsMade >= req.MaxRequests {
+				return result, err
+			}
+			retries++
+			if err := waitRetry(ctx, time.Duration(retries)*time.Second); err != nil {
+				return result, fmt.Errorf("agent: retry wait canceled: %w", err)
+			}
 		}
 		result.ResponseID = response.ID
 		result.Usage.InputTokens += response.Usage.InputTokens
@@ -176,7 +195,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 				return result, fmt.Errorf("agent: arguments for tool %q do not match its schema: %w", call.Name, err)
 			}
 		}
-		if requestNo+1 >= req.MaxRequests {
+		if requestsMade >= req.MaxRequests {
 			return result, fmt.Errorf("agent: request limit exhausted (%d) before tool execution", req.MaxRequests)
 		}
 
@@ -201,6 +220,41 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	return result, fmt.Errorf("agent: request limit exceeded (%d)", req.MaxRequests)
+}
+
+func retryableResponseError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case 429, 502, 503, 504:
+			return true
+		default:
+			return false
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) && strings.Contains(syntaxErr.Error(), "unexpected end of JSON input") {
+		return true
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
+func waitRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func normalizeInput(raw json.RawMessage) ([]json.RawMessage, error) {

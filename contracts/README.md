@@ -21,7 +21,7 @@ migration. The current PostgreSQL schema records migration version `1`.
 |---|---|
 | `Workflow` | Durable Issue workflow identity and state: repository and Issue IDs, `phase`, `control`, `generation`, optimistic `version`, accepted `Spec`, Dev `Tasks`, PR/base/head SHAs, `Review`, `Evidence`, model usage, and timestamps. |
 | `Spec` | Accepted requirement snapshot: `revision`, `digest`, title/description, testable `criteria`, non-goals, risk, source hash, and approval identity/state. `SpecDigest` excludes the digest field itself. |
-| `Task` | Bounded work unit with stable ID, description, allowed paths, dependencies, status, attempt count, lease epoch, integrated SHA, optional report, and review obligation IDs. |
+| `Task` | Bounded work unit with stable ID, description, kind (`code`, `verification`, or `analysis`), allowed paths, dependencies, status, attempt count, lease epoch, integrated SHA, optional report, and review obligation IDs. |
 | `Review` | One review snapshot: verification `key`, review tasks, complete obligations ledger, findings, skeptic and verification completion flags, verdict, and reason. |
 | `Obligation` | A mandatory check tied to an acceptance criterion. An obligation is only complete when its result is `satisfied` and it carries evidence references. |
 | `Finding` | A review claim with severity, category, source location, preconditions, expected/actual behavior, evidence type and references, state, verification key, and history. |
@@ -60,20 +60,35 @@ not a required complete object:
 
 `phase` is business progress. The MVP uses `INTAKE`, `TRIAGE`, `PLANNING`,
 `DEVELOPING`, `VERIFYING`, `REVIEWING`, `CHANGES_REQUESTED`, `READY`,
-`COMPLETED`, `FAILED`, `BLOCKED`, `CANCELLED`, and `MERGED`. Only active work
+`SPEC_READY`, `NEEDS_INFO`, `REJECT_PROPOSED`, `REJECTED`, `DEFERRED`,
+`AWAITING_MAINTAINER`, `WAITING_CONFIGURATION`, `BLOCKED`, and `MERGED`. Only active work
 phases are schedulable; `domain.Runnable` is the code-level check.
 
-`control` independently governs execution: `ACTIVE`, `PAUSED`, `CANCELLED`, or
-`TAKEOVER`. A non-active control state prevents scheduling even if the phase
+`control` independently governs execution: `ACTIVE`, `PAUSING`, `PAUSED`,
+`CANCELLING`, `CANCELLED`, `HUMAN_OWNED`, or `COMPLETED`. A non-active control state prevents scheduling even if the phase
 would otherwise be runnable. Status strings remain open for additive values;
 consumers must handle unknown values safely.
 
-Task status values include `INTEGRATED` for accepted Dev code and `ACCEPTED`
+Task status values include `INTEGRATED` for validated Dev artifacts and `ACCEPTED`
 for completed Review work. Obligation results include `unverified`, `satisfied`,
 and `failed`. Finding severity and state values are defined by the producers;
 the merge gate treats unresolved `critical`, `high`, and `medium` findings as
 blocking. Evidence kinds distinguish model claims, source analysis, and
 tool-verified results.
+
+Dev code dependencies consume a committed `integrated_sha`. Analysis and
+verification tasks consume independently recorded `NON_CODE_ARTIFACT` reports
+with evidence from their own attempt. Empty legacy task kinds retain code
+semantics. Analysis tasks have read tools; verification tasks can run commands
+but cannot write through file tools. The supervisor rejects any source changes
+from either non-code kind. Verification requires `result=satisfied` plus a
+successful command transcript. These reports do not replace the independent
+Review or trusted Verification Runner.
+
+The dashboard exposes `gate_status`, `gate_conclusion`, `check_id`, `check_sha`
+and `gate_confirmed_at` from GitHub receipts/reconciliation. A local review
+verdict alone does not confirm that the remote check succeeded. Consumers must
+compare the check SHA with the current head SHA before displaying its result.
 
 ## Identity and merge gate
 
