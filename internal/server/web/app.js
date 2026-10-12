@@ -621,7 +621,7 @@
     };
     frame(12, 12, 596, 148, "flow-shared-frame", "外部参与与共用内核", "共享状态 / 策略 / 取消控制覆盖两队；Publisher 只执行受控写入。 ");
     frame(12, 180, 596, 304, "flow-team-frame flow-dev-frame", "Dev Team", "可写独立源码副本；澄清回 Issue，拒绝 / 延期由 Maintainer 覆核。 ");
-    frame(12, 560, 596, 320, "flow-team-frame flow-review-frame", "Review Team", "只读候选快照；Reviewer + Skeptic + 独立验证，不改 PR 源码。 ");
+    frame(12, 560, 596, 320, "flow-team-frame flow-review-frame", "Review Team", "只读候选快照，不修改 PR 源码。 ");
     frame(12, 900, 596, 120, "flow-shared-frame flow-outcomes-frame", "Maintainer 控制最终结果", "只有人决定是否合并；争议和预算边界交由人工接管。 ");
 
     const nodes = {
@@ -702,7 +702,7 @@
     connector(`M ${left("gate")} ${centerY("gate")} H 8 V ${centerY("fix")} H ${left("fix")}`);
     edgeLabel("审查反馈 → Dev 修复", 106, 520);
     // Gate passes go to Maintainer review; uncertainty takes the independent takeover route.
-    connector(`M 52 ${bottom("gate")} V ${top("currentVersion")}`);
+    connector(`M 52 ${bottom("gate")} V 888 H 16 V ${centerY("currentVersion")} H ${left("currentVersion")}`);
     connector(`M 100 ${bottom("gate")} V 892 H 612 V ${centerY("takeover")} H ${right("takeover")}`);
 
     const nodeStatusName = { done: "已完成", active: "当前步骤", pending: "待执行", paused: "已暂停", blocked: "受阻", human: "人工控制", cancelled: "已取消", stale: "历史 / 待重审", context: "共享组件" };
