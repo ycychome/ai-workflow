@@ -131,6 +131,13 @@ next_attempt=now()+$4*interval '1 second' WHERE id=$1 AND attempts=$5 AND state=
 	return nil
 }
 func (s *Store) Create(ctx context.Context, w domain.Workflow) error {
+	_, err := s.CreateIfAbsent(ctx, w)
+	return err
+}
+
+// CreateIfAbsent creates a workflow and its metrics row atomically. The bool
+// reports whether this call won the repository/issue uniqueness race.
+func (s *Store) CreateIfAbsent(ctx context.Context, w domain.Workflow) (bool, error) {
 	w.Version = 1
 	w.Generation = 1
 	w.CreatedAt = time.Now().UTC()
@@ -144,18 +151,24 @@ func (s *Store) Create(ctx context.Context, w domain.Workflow) error {
 	b, _ := json.Marshal(w)
 	tx, e := s.DB.Begin(ctx)
 	if e != nil {
-		return e
+		return false, e
 	}
 	defer tx.Rollback(ctx)
-	_, e = tx.Exec(ctx, `INSERT INTO workflows(id,repository_id,issue,phase,control,generation,version,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, w.ID, w.RepositoryID, w.Issue, w.Phase, w.Control, w.Generation, w.Version, b)
+	tag, e := tx.Exec(ctx, `INSERT INTO workflows(id,repository_id,issue,phase,control,generation,version,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, w.ID, w.RepositoryID, w.Issue, w.Phase, w.Control, w.Generation, w.Version, b)
 	if e != nil {
-		return e
+		return false, e
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO workflow_metrics(workflow_id) VALUES($1) ON CONFLICT DO NOTHING`, w.ID)
 	if e != nil {
-		return e
+		return false, e
 	}
-	return tx.Commit(ctx)
+	if e = tx.Commit(ctx); e != nil {
+		return false, e
+	}
+	return true, nil
 }
 
 const workflowSelect = `SELECT w.data,w.version,w.generation,w.phase,w.control,w.lease_owner,COALESCE(w.lease_until,'epoch'::timestamptz),m.calls,m.input_tokens,m.output_tokens,m.runtime_seconds FROM workflows w JOIN workflow_metrics m ON m.workflow_id=w.id`

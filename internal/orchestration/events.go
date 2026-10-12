@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ycychome/ai-workflow/internal/domain"
@@ -15,12 +17,17 @@ import (
 func (e *Engine) reconcileLoop(ctx context.Context) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
+	historicalPages := make(map[string]int)
+	// Run discovery immediately on startup so issues created during a webhook
+	// outage do not wait for the first periodic reconciliation interval.
+	e.discoverOpenIssues(ctx, historicalPages)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+		e.discoverOpenIssues(ctx, historicalPages)
 		workflows, err := e.Store.List(ctx)
 		if err != nil {
 			continue
@@ -35,6 +42,72 @@ func (e *Engine) reconcileLoop(ctx context.Context) {
 			_ = e.reconcileOne(ctx, w)
 		}
 	}
+}
+
+// discoverOpenIssues repairs missed issues/opened deliveries using current
+// GitHub state. It reads two bounded pages per configured repository and only
+// creates INTAKE workflows; it never replays comments or authorizes work.
+func (e *Engine) discoverOpenIssues(ctx context.Context, historicalPages map[string]int) {
+	cfg := e.Config()
+	if len(cfg.Repositories) == 0 || cfg.GitHub.AppID <= 0 || cfg.GitHub.InstallationID <= 0 {
+		return
+	}
+	app, err := e.App()
+	if err != nil {
+		slog.Warn("issue discovery unavailable", "error", err)
+		return
+	}
+	for _, repoCfg := range cfg.Repositories {
+		if ctx.Err() != nil {
+			return
+		}
+		parts := strings.Split(repoCfg.Name, "/")
+		if repoCfg.ID <= 0 || len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			continue
+		}
+		client := app.ForInstallation(ctx, cfg.GitHub.InstallationID)
+		issues, err := client.ListOpenIssuesPage(ctx, parts[0], parts[1], 1)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("discover open GitHub issues", "repository", repoCfg.Name, "error", err)
+				e.Store.Audit(context.WithoutCancel(ctx), "", "issue_discovery_error", map[string]any{"repository": repoCfg.Name, "page": 1, "error": err.Error()})
+			}
+		}
+		page := historicalPages[repoCfg.Name]
+		if page < 2 {
+			page = 2
+		}
+		history, historyErr := client.ListOpenIssuesPage(ctx, parts[0], parts[1], page)
+		if historyErr != nil {
+			if ctx.Err() == nil {
+				slog.Warn("discover historical GitHub issues", "repository", repoCfg.Name, "page", page, "error", historyErr)
+				e.Store.Audit(context.WithoutCancel(ctx), "", "issue_discovery_error", map[string]any{"repository": repoCfg.Name, "page": page, "error": historyErr.Error()})
+			}
+		} else {
+			issues = append(issues, history...)
+			if len(history) < 100 {
+				historicalPages[repoCfg.Name] = 2
+			} else {
+				historicalPages[repoCfg.Name] = page + 1
+			}
+		}
+		for _, issue := range issues {
+			if ctx.Err() != nil {
+				return
+			}
+			if !discoverableIssue(issue) {
+				continue
+			}
+			if err := e.createIntake(ctx, repoCfg, cfg.GitHub.InstallationID, issue, "reconcile_discovery"); err != nil && ctx.Err() == nil {
+				slog.Warn("recover missed GitHub issue", "repository", repoCfg.Name, "issue", issue.Number, "error", err)
+				e.Store.Audit(context.WithoutCancel(ctx), domain.ID(repoCfg.ID, issue.Number), "issue_discovery_error", map[string]any{"repository": repoCfg.Name, "issue": issue.Number, "error": err.Error()})
+			}
+		}
+	}
+}
+
+func discoverableIssue(issue gh.Issue) bool {
+	return issue.Number > 0 && issue.State == "open" && issue.PullRequest == nil
 }
 
 // reconcileOne refreshes authoritative issue, PR and branch state. Webhooks are

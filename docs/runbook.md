@@ -93,6 +93,11 @@ workflow when review evidence is incomplete or uncertain. The service uses a
 durable PostgreSQL database and `/data` volume, with a webhook Inbox and an
 external-effect Outbox for restart recovery and reconciliation. Inbox/Outbox
 processing is at least once; uncertain GitHub writes require reconciliation.
+At startup and every 60 seconds, the service also discovers open Issues from each
+configured repository. Each pass reads the newest page and one rotating historical
+page (100 records per page), excludes pull requests, and creates missing Issues
+only in INTAKE. This repairs missed opening events without authorizing model work
+or replaying old comment commands. Recovery and discovery errors appear in audit.
 
 MVP worker settings allow up to two builders and two reviewers. Work remains
 bound to a generation, lease, path scope, and verification identity. A passing

@@ -80,6 +80,25 @@ func (i *InstallationClient) GetIssue(ctx context.Context, owner, repo string, n
 	return x, e
 }
 
+// ListRecentOpenIssues returns the newest 100 open issue records. GitHub's
+// issues endpoint also includes pull requests; callers must filter those via
+// Issue.PullRequest. The fixed page size bounds recovery scans to one request
+// per configured repository.
+func (i *InstallationClient) ListRecentOpenIssues(ctx context.Context, owner, repo string) ([]Issue, error) {
+	return i.ListOpenIssuesPage(ctx, owner, repo, 1)
+}
+
+// ListOpenIssuesPage returns one bounded page from GitHub's open-issues list.
+func (i *InstallationClient) ListOpenIssuesPage(ctx context.Context, owner, repo string, page int) ([]Issue, error) {
+	if page < 1 {
+		return nil, errors.New("github: issue page must be positive")
+	}
+	var out []Issue
+	path := fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=100&page=%d&sort=created&direction=desc", q(owner), q(repo), page)
+	err := i.request(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
 type PullRequest struct {
 	Number   int        `json:"number"`
 	NodeID   string     `json:"node_id"`

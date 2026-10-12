@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ycychome/ai-workflow/internal/config"
 	"github.com/ycychome/ai-workflow/internal/domain"
 	gh "github.com/ycychome/ai-workflow/internal/github"
 	"github.com/ycychome/ai-workflow/internal/sandbox"
@@ -202,17 +203,7 @@ func (e *Engine) handleInbox(ctx context.Context, x store.Inbox) error {
 	}
 	if event.Issue != nil && event.Issue.PullRequest == nil {
 		if x.Event == "issues" && event.Action == "opened" {
-			id := domain.ID(repo.ID, event.Issue.Number)
-			w := domain.Workflow{ID: id, RepositoryID: repo.ID, Repository: repo.Name, InstallationID: event.Installation.ID,
-				Issue: event.Issue.Number, IssueTitle: event.Issue.Title, IssueBody: event.Issue.Body, Phase: "INTAKE", Control: "ACTIVE",
-				BaseBranch: repo.BaseBranch, BaseSHA: "", Branch: fmt.Sprintf("codex/issue-%d", event.Issue.Number)}
-			w.Spec.SourceHash = normalizedIssueHash(event.Issue.Body)
-			if err := e.Store.Create(ctx, w); err != nil {
-				return err
-			}
-			return e.Store.Update(ctx, id, func(current *domain.Workflow) ([]store.Action, error) {
-				return []store.Action{statusAction(*current)}, nil
-			})
+			return e.createIntake(ctx, repo, event.Installation.ID, *event.Issue, "webhook")
 		}
 		w, err := e.Store.Get(ctx, domain.ID(repo.ID, event.Issue.Number))
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -251,6 +242,34 @@ func (e *Engine) handleInbox(ctx context.Context, x store.Inbox) error {
 		return e.pullRequestEvent(ctx, w, event)
 	}
 	return nil
+}
+
+// createIntake safely converges webhook delivery and periodic discovery. Only
+// the caller that inserted the unique repository/issue row emits the initial
+// status comment; a racing or redelivered path is a no-op.
+func (e *Engine) createIntake(ctx context.Context, repo config.Repository, installationID int64, issue gh.Issue, source string) error {
+	if repo.ID <= 0 || installationID <= 0 || issue.Number <= 0 || issue.PullRequest != nil || issue.State == "closed" {
+		return nil
+	}
+	w := domain.Workflow{
+		ID: domain.ID(repo.ID, issue.Number), RepositoryID: repo.ID, Repository: repo.Name,
+		InstallationID: installationID, Issue: issue.Number, IssueTitle: issue.Title,
+		IssueBody: issue.Body, Phase: "INTAKE", Control: "ACTIVE", BaseBranch: repo.BaseBranch,
+		Branch: fmt.Sprintf("codex/issue-%d", issue.Number),
+	}
+	w.Spec.SourceHash = normalizedIssueHash(issue.Body)
+	created, err := e.Store.CreateIfAbsent(ctx, w)
+	if err != nil || !created {
+		return err
+	}
+	if source == "reconcile_discovery" {
+		e.Store.Audit(context.WithoutCancel(ctx), w.ID, "issue_intake_recovered", map[string]any{
+			"source": source, "issue_url": issue.HTMLURL, "issue_number": issue.Number,
+		})
+	}
+	return e.Store.Update(ctx, w.ID, func(current *domain.Workflow) ([]store.Action, error) {
+		return []store.Action{statusAction(*current)}, nil
+	})
 }
 
 func normalizedIssueHash(s string) string { return domain.Digest(strings.Join(strings.Fields(s), " ")) }

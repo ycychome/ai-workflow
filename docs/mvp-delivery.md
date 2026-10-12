@@ -14,7 +14,7 @@
 
 ## 工作流操作
 
-1. 在试点仓库创建明确需求 Issue。新 Issue 进入 `INTAKE`，不会仅因公网用户发帖而消耗模型预算。
+1. 在试点仓库创建明确需求 Issue。新 Issue 进入 `INTAKE`，不会仅因公网用户发帖而消耗模型预算。启动时及每 60 秒通过 GitHub API 补发现漏送的开放 Issue，每仓库每轮读取最新页和一页轮转历史记录；补入不会自动接受需求或重放评论命令。
 2. 维护者评论 `/ai accept`，或在已登录控制台接受，启动 Triage。
 3. 查看提议 TaskSpec 的验收条件，再次 `/ai accept` 批准规格。开发任务按依赖和文件冲突调度，产生主要 PR。
 4. 可信验证和独立 Reviewer/Skeptic 对当前 base/head/spec/policy 身份记录证据。只有覆盖完整、验证成功且没有未解决阻塞发现时发布 `workflow/merge-gate` 成功。
