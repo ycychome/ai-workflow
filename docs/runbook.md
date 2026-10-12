@@ -105,6 +105,14 @@ gate publishes a check for the current candidate but never merges it. A
 Maintainer must inspect the pull request and merge through GitHub's normal
 interface.
 
+The current MVP reserves one workflow lane per repository through
+`AWAITING_MAINTAINER`. A later accepted Issue can remain in TRIAGE with zero model
+calls while the prior PR awaits a human decision. Dashboard scheduling metadata
+distinguishes this queued state from a leased execution and identifies the
+blocking workflow. Complete or cancel the earlier workflow to release the lane;
+pausing it does not release an awaiting-maintainer lane. Queue observation does
+not change authorization, the workflow generation, or the merge gate.
+
 ## Backup, restore, and shutdown
 
 Create a database and `/data` archive with:

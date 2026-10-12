@@ -231,6 +231,9 @@ WHERE w.control='ACTIVE'
   AND w.phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')
   AND (w.lease_until IS NULL OR w.lease_until<now())
   AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.workflow_id=w.id AND o.kind IN('publish','gate','ready') AND o.state IN('pending','running','unknown','retry_wait'))
+  AND NOT EXISTS(SELECT 1 FROM workflows other WHERE other.repository_id=w.repository_id AND other.id<>w.id
+    AND (other.lease_until>now()
+      OR (other.phase='AWAITING_MAINTAINER' AND other.control NOT IN('CANCELLED','CANCELLING','COMPLETED'))))
 ORDER BY w.updated_at
 FOR UPDATE OF w SKIP LOCKED
 LIMIT 1`).Scan(&id, &repositoryID)

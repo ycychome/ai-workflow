@@ -191,6 +191,9 @@
   function renderStats(workflows) {
     const runnablePhases = new Set(["TRIAGE", "PLANNING", "DEVELOPING", "VERIFYING", "REVIEWING", "CHANGES_REQUESTED"]);
     const runnable = workflows.filter(w => w.control === "ACTIVE" && runnablePhases.has(w.phase)).length;
+    const hasScheduling = workflows.some(w => w.scheduling && typeof w.scheduling.status === "string");
+    const running = workflows.filter(w => w.scheduling?.status === "running").length;
+    const queued = workflows.filter(w => w.scheduling?.status === "queued").length;
     const completed = workflows.filter(w => w.phase === "MERGED" || w.control === "COMPLETED" || (w.phase === "AWAITING_MAINTAINER" && w.control === "ACTIVE" && w.review?.verdict === "PASS")).length;
     const errors = workflows.filter(w => Boolean(w.last_error) || ["FAILED", "BLOCKED"].includes(w.phase)).length;
     const calls = workflows.reduce((sum, w) => sum + number(w.model_calls), 0);
@@ -206,7 +209,9 @@
       : "成本单价未完整配置";
     const items = [
       ["工作流总数", workflows.length, "当前可见工作流", "▤"],
-      ["可执行", runnable, "阶段可运行且控制状态为 ACTIVE", "◷"],
+      hasScheduling
+        ? ["执行中", running, `${queued} 条排队等待`, "◷"]
+        : ["可执行", runnable, "已授权可执行；此 API 未提供实际租约状态", "◷"],
       ["待合并 / 已完成", completed, "等待维护者合并或已完成", "✓"],
       ["Token 使用量", formatNumber(totalTokens), `${costText} · 输入 ${formatNumber(inputTokens)} / 输出 ${formatNumber(outputTokens)} · ${formatNumber(calls)} 次调用`, "✦"]
     ];
@@ -240,7 +245,7 @@
     row.dataset.workflowId = workflow.id;
     if (workflow.id === state.selected) row.classList.add("selected");
     const first = document.createElement("td"); first.append(workflowNameCell(workflow)); row.append(first);
-    const phase = document.createElement("td"); phase.append(statusBadge(workflow.phase, phaseLabel(workflow.phase))); row.append(phase);
+    const phase = document.createElement("td"); phase.append(statusBadge(workflow.phase, phaseLabel(workflow.phase))); appendSchedulingStatus(phase, workflow, true); row.append(phase);
     const control = document.createElement("td"); control.append(statusBadge(workflow.control, controlLabel(workflow.control))); row.append(control);
     if (detailed) {
       const gen = document.createElement("td"); gen.append(el("span", "numeric-cell", `G${text(workflow.generation, 0)} · ${workflow.pr ? `#${workflow.pr}` : "无 PR"}`)); row.append(gen);
@@ -256,7 +261,7 @@
   }
 
   function renderOverview(workflows) {
-    const signature = JSON.stringify({ selected: state.selected, rows: workflows.slice(0, 8).map(w => [w.id, w.phase, w.control, w.generation, w.model_calls, w.updated_at]) });
+    const signature = JSON.stringify({ selected: state.selected, rows: workflows.slice(0, 8).map(w => [w.id, w.phase, w.control, w.generation, w.model_calls, w.scheduling, w.updated_at]) });
     if (signature === overviewSignature) return;
     overviewSignature = signature;
     const scrollY = window.scrollY;
@@ -293,7 +298,7 @@
       const searchable = `${w.repository || ""} ${w.issue || ""} ${workflowTitle(w)} ${w.id || ""}`.toLowerCase();
       return (!query || searchable.includes(query)) && (!phase || w.phase === phase) && (!control || w.control === control);
     });
-    const signature = JSON.stringify({ query, phase, control, selected: state.selected, rows: visible.map(w => [w.id, w.phase, w.control, w.generation, w.pr, w.model_calls, w.tasks?.length, w.updated_at]) });
+    const signature = JSON.stringify({ query, phase, control, selected: state.selected, rows: visible.map(w => [w.id, w.phase, w.control, w.generation, w.pr, w.model_calls, w.tasks?.length, w.scheduling, w.updated_at]) });
     if (signature === workflowListSignature) return;
     workflowListSignature = signature;
     const scrollY = window.scrollY;
@@ -308,6 +313,64 @@
 
   function selectWorkflow(id) {
     navigate(`/workflows/${encodeURIComponent(id)}/overview`);
+  }
+
+  function appendSchedulingStatus(container, workflow, compact = false) {
+    const scheduling = workflow.scheduling;
+    if (!scheduling || !["queued", "running"].includes(scheduling.status)) return;
+    const row = el("div", `scheduling-indicator${compact ? " compact" : ""}`);
+    row.append(statusBadge(scheduling.status === "queued" ? "PAUSED" : "DEVELOPING", scheduling.status === "queued" ? "排队等待" : "正在执行"));
+    if (scheduling.status === "queued") {
+      row.append(el("span", "scheduling-reason", text(scheduling.reason_text, "当前可执行，等待工作区调度。")));
+      const refs = el("span", "scheduling-references");
+      if (scheduling.blocking_workflow_id) {
+        const blockerLabel = [scheduling.blocking_repository, scheduling.blocking_issue ? `#${scheduling.blocking_issue}` : ""].filter(Boolean).join(" · ") || `工作流 ${scheduling.blocking_workflow_id}`;
+        const blockerLink = el("a", "scheduling-link", blockerLabel);
+        blockerLink.href = `#/workflows/${encodeURIComponent(scheduling.blocking_workflow_id)}/overview`;
+        blockerLink.addEventListener("click", event => event.stopPropagation());
+        refs.append(blockerLink);
+      }
+      if (scheduling.blocking_pr && scheduling.blocking_repository) {
+        const repositoryParts = String(scheduling.blocking_repository).split("/");
+        if (repositoryParts.length === 2 && repositoryParts.every(Boolean)) {
+          const prLink = el("a", "scheduling-link", `PR #${scheduling.blocking_pr}`);
+          prLink.href = `https://github.com/${repositoryParts.map(encodeURIComponent).join("/")}/pull/${encodeURIComponent(scheduling.blocking_pr)}`;
+          prLink.target = "_blank";
+          prLink.rel = "noopener noreferrer";
+          prLink.addEventListener("click", event => event.stopPropagation());
+          refs.append(prLink);
+        }
+      }
+      if (refs.childNodes.length) row.append(refs);
+    }
+    container.append(row);
+  }
+
+  function schedulingNotice(workflow) {
+    const scheduling = workflow.scheduling;
+    if (scheduling?.status !== "queued") return null;
+    const notice = el("aside", "scheduling-notice");
+    notice.append(el("strong", "", "工作流已进入队列，尚未开始执行"));
+    notice.append(el("p", "", text(scheduling.reason_text, "当前阶段可执行，但尚未获得执行租约。")));
+    const refs = el("div", "scheduling-references");
+    if (scheduling.blocking_workflow_id) {
+      const blockerLabel = [scheduling.blocking_repository, scheduling.blocking_issue ? `Issue #${scheduling.blocking_issue}` : ""].filter(Boolean).join(" · ") || `工作流 ${scheduling.blocking_workflow_id}`;
+      const blockerLink = el("a", "scheduling-link", `查看阻塞项：${blockerLabel}`);
+      blockerLink.href = `#/workflows/${encodeURIComponent(scheduling.blocking_workflow_id)}/overview`;
+      refs.append(blockerLink);
+    }
+    if (scheduling.blocking_pr && scheduling.blocking_repository) {
+      const repositoryParts = String(scheduling.blocking_repository).split("/");
+      if (repositoryParts.length === 2 && repositoryParts.every(Boolean)) {
+        const prLink = el("a", "scheduling-link", `打开阻塞 PR #${scheduling.blocking_pr}`);
+        prLink.href = `https://github.com/${repositoryParts.map(encodeURIComponent).join("/")}/pull/${encodeURIComponent(scheduling.blocking_pr)}`;
+        prLink.target = "_blank";
+        prLink.rel = "noopener noreferrer";
+        refs.append(prLink);
+      }
+    }
+    if (refs.childNodes.length) notice.append(refs);
+    return notice;
   }
 
   function detailPair(list, label, value) {
@@ -569,6 +632,7 @@
           (node === "reviewer2" && reviewerTasks[1]?.status === "ACCEPTED") ||
           (node === "skeptic" && w.review?.skeptic_complete) ||
           (node === "verify" && w.review?.verification_passed))) status = "stale";
+    if (w.scheduling?.status === "queued" && status === "active") status = "pending";
     return status;
   }
 
@@ -848,6 +912,7 @@
 
   function flowCurrentLabel(w) {
     const phase = w.phase;
+    if (w.scheduling?.status === "queued") return "排队等待";
     if (w.review?.verdict === "OBSOLETE" && ["VERIFYING", "REVIEWING", "READY", "AWAITING_MAINTAINER"].includes(phase)) return "审查待重做";
     if (phase === "REVIEWING") {
       const tasks = w.review?.tasks || [];
@@ -979,7 +1044,10 @@
       grid.append(detailSection("验证证据", Array.isArray(w.evidence) ? w.evidence.length : 0, evidence, true));
     }
     body.append(grid);
-    container.append(heading, tabs, body);
+    container.append(heading);
+    const queueNotice = schedulingNotice(w);
+    if (queueNotice) container.append(queueNotice);
+    container.append(tabs, body);
     window.requestAnimationFrame(() => {
       window.scrollTo({ top: scrollY, behavior: "auto" });
       body.scrollTop = contentScrollTop;

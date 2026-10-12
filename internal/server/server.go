@@ -26,8 +26,10 @@ import (
 
 	"github.com/ycychome/ai-workflow/internal/agent"
 	"github.com/ycychome/ai-workflow/internal/config"
+	"github.com/ycychome/ai-workflow/internal/domain"
 	gh "github.com/ycychome/ai-workflow/internal/github"
 	"github.com/ycychome/ai-workflow/internal/orchestration"
+	"github.com/ycychome/ai-workflow/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,6 +43,11 @@ const (
 )
 
 type pendingState struct{ expires time.Time }
+
+type workflowStateView struct {
+	domain.Workflow
+	Scheduling store.Scheduling `json:"scheduling"`
+}
 
 // Handlers owns the two HTTP surfaces used by the control process.
 type Handlers struct {
@@ -327,14 +334,21 @@ func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load workflows")
 		return
 	}
+	scheduling, err := h.engine.Store.SchedulingFor(ctx, workflows)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load workflow scheduling metadata")
+		return
+	}
 	maxGeneration := int64(0)
+	views := make([]workflowStateView, 0, len(workflows))
 	for _, wf := range workflows {
 		if wf.Generation > maxGeneration {
 			maxGeneration = wf.Generation
 		}
+		views = append(views, workflowStateView{Workflow: wf, Scheduling: scheduling[wf.ID]})
 	}
 	cfg := h.engine.Config()
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": workflows, "health": h.basicHealth(ctx, cfg), "config": publicConfig(cfg), "generation": maxGeneration})
+	writeJSON(w, http.StatusOK, map[string]any{"workflows": views, "health": h.basicHealth(ctx, cfg), "config": publicConfig(cfg), "generation": maxGeneration})
 }
 
 func (h *Handlers) basicHealth(ctx context.Context, cfg config.Config) map[string]any {

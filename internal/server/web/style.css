@@ -121,6 +121,16 @@ tbody tr.selected { background: #f2f6ff; }
 .badge-amber { color: #a67322; background: #fff5e4; }
 .badge-red { color: #b94f5b; background: #fff0f1; }
 .badge-muted { color: #778397; background: #eff1f5; }
+.scheduling-indicator { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; max-width: 300px; margin-top: 7px; white-space: normal; line-height: 1.4; }
+.scheduling-indicator.compact { min-width: 170px; max-width: 250px; margin-top: 6px; }
+.scheduling-reason { color: #737f91; font-size: 10px; white-space: normal; }
+.scheduling-references { display: flex; flex-wrap: wrap; gap: 4px 10px; color: #5b76a4; font-size: 10px; white-space: normal; }
+.scheduling-link { color: #476fae; text-decoration: underline; text-decoration-color: #c5d1e3; text-underline-offset: 2px; }
+.scheduling-link:hover { color: #254e91; text-decoration-color: currentColor; }
+.scheduling-notice { margin: 0 0 14px; padding: 13px 15px; color: #6c5a38; background: #fff9ef; border: 1px solid #f0dfc1; border-radius: 10px; }
+.scheduling-notice > strong { color: #72551f; font-size: 12px; }
+.scheduling-notice > p { margin: 5px 0 7px; color: #7e6a45; font-size: 11px; line-height: 1.5; }
+.scheduling-notice .scheduling-references { font-size: 11px; }
 .numeric-cell { color: #45536a; font-variant-numeric: tabular-nums; }
 .empty-state { padding: 38px 20px; color: #98a3b3; text-align: center; font-size: 12px; }
 
