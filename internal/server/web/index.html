@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>工作流控制台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <section class="login-shell" id="login-view" hidden>
+    <div class="login-card">
+      <div class="brand-mark">AW</div>
+      <p class="eyebrow">AI WORKFLOW · PRIVATE CONSOLE</p>
+      <h1>工作流控制台</h1>
+      <p class="muted">使用本地控制台访问令牌登录。令牌仅提交给服务器，不会保存在浏览器中。</p>
+      <form id="login-form" class="stack">
+        <label for="login-token">访问令牌</label>
+        <input id="login-token" name="token" type="password" autocomplete="current-password" required placeholder="输入控制台令牌">
+        <button class="button button-primary button-wide" type="submit">安全登录 <span aria-hidden="true">→</span></button>
+        <p class="form-message" id="login-error" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-shell" id="app-view" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="工作流控制台首页">
+        <span class="brand-mark">AW</span>
+        <span><strong>工作流</strong><small>控制台</small></span>
+      </a>
+      <div class="workspace-label">工作区 <span class="live-dot"></span></div>
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span>总览</button>
+        <button class="nav-link" data-view="workflows"><span class="nav-icon">▤</span>工作流</button>
+        <button class="nav-link" data-view="events"><span class="nav-icon">◷</span>事件审计</button>
+        <button class="nav-link" data-view="settings"><span class="nav-icon">⚙</span>设置</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <a class="setup-link" href="/setup"><span class="setup-icon">↗</span><span>GitHub App 注册<span class="setup-sub">配置 Webhook 与安装</span></span></a>
+        <div class="sidebar-foot"><span class="live-dot"></span>本地服务运行中</div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="crumb"><span>控制台</span><span class="crumb-sep">/</span><strong id="page-title">总览</strong></div>
+        <div class="top-actions">
+          <span class="refresh-state" id="refresh-state">正在连接…</span>
+          <button class="icon-button" id="refresh-button" title="立即刷新" aria-label="立即刷新">↻</button>
+          <div class="avatar">AW</div>
+        </div>
+      </header>
+
+      <div class="page-wrap">
+        <section class="view-panel" data-panel="overview">
+          <div class="page-heading">
+            <div><p class="eyebrow">运行概况</p><h1>你好，欢迎回来</h1><p class="muted">查看自动化工作流状态、执行进度与健康检查。</p></div>
+            <div class="heading-actions"><button class="button button-secondary" id="demo-button"><span>＋</span>创建本地演示</button><button class="button button-secondary" id="doctor-button"><span>✳</span>运行诊断</button></div>
+          </div>
+          <div class="health-strip" id="health-strip" aria-live="polite"></div>
+          <div class="stats-grid" id="stats-grid"></div>
+          <div class="section-heading"><div><h2>最近工作流</h2><p class="muted">实时状态每 3 秒更新</p></div><button class="text-button" data-go="workflows">查看全部 <span>→</span></button></div>
+          <div class="card table-card"><div class="table-scroll"><table><thead><tr><th>工作流</th><th>阶段</th><th>控制</th><th>代次</th><th>模型调用</th><th>更新时间</th></tr></thead><tbody id="overview-rows"></tbody></table></div><div class="empty-state" id="overview-empty" hidden>暂无工作流。Webhook 接入后，新 Issue 会显示在这里。</div></div>
+        </section>
+
+        <section class="view-panel" data-panel="workflows" hidden>
+          <div class="page-heading"><div><p class="eyebrow">执行队列</p><h1>工作流</h1><p class="muted">筛选执行状态，查看完整任务与审查证据。</p></div></div>
+          <div class="filter-bar card">
+            <label class="search-field"><span aria-hidden="true">⌕</span><input id="workflow-search" type="search" placeholder="搜索仓库、Issue 或标题"></label>
+            <select id="phase-filter" aria-label="按阶段筛选"><option value="">所有阶段</option></select>
+            <select id="control-filter" aria-label="按控制状态筛选"><option value="">所有控制状态</option><option value="ACTIVE">运行中</option><option value="PAUSED">已暂停</option><option value="CANCELLED">已取消</option><option value="TAKEOVER">人工接管</option></select>
+          </div>
+          <div class="card table-card"><div class="table-scroll"><table><thead><tr><th>工作流</th><th>阶段</th><th>控制</th><th>代次 / PR</th><th>模型用量</th><th>任务</th><th>更新时间</th></tr></thead><tbody id="workflow-rows"></tbody></table></div><div class="empty-state" id="workflow-empty" hidden>没有符合条件的工作流。</div></div>
+          <div class="detail-card card" id="workflow-detail"><div class="detail-placeholder">选择一条工作流查看详情。</div></div>
+        </section>
+
+        <section class="view-panel" data-panel="events" hidden>
+          <div class="page-heading"><div><p class="eyebrow">操作记录</p><h1>事件审计</h1><p class="muted">按工作流查看控制动作与系统事件。</p></div></div>
+          <div class="filter-bar card"><label class="select-label" for="audit-workflow">工作流</label><select id="audit-workflow"><option value="">全部事件</option></select><button class="button button-secondary" id="audit-refresh">刷新审计</button></div>
+          <div class="card audit-card"><div class="audit-list" id="audit-list"></div><div class="empty-state" id="audit-empty" hidden>暂无审计事件。</div></div>
+        </section>
+
+        <section class="view-panel" data-panel="settings" hidden>
+          <div class="page-heading"><div><p class="eyebrow">服务配置</p><h1>设置</h1><p class="muted">调整模型、资源预算与并行执行数量。</p></div></div>
+          <div class="settings-layout">
+            <form class="settings-form" id="settings-form">
+              <section class="card form-card">
+                <div class="form-section-title"><span class="section-icon violet">✦</span><div><h2>模型服务</h2><p>连接兼容 Responses API 的模型服务。</p></div></div>
+                <div class="form-grid">
+                  <label class="field field-wide">Base URL<input name="base_url" type="url" placeholder="https://api.example.com/v1" autocomplete="url"></label>
+                  <label class="field">开发模型<input name="dev" type="text" placeholder="模型名称"></label>
+                  <label class="field">审查模型<input name="review" type="text" placeholder="模型名称"></label>
+                  <label class="field">最大输出 Token<input name="max_output_tokens" type="number" min="1" step="1"></label>
+                  <label class="field">访问 Token <span class="field-hint">仅写入，不会读取或显示</span><input name="token" type="password" autocomplete="new-password" placeholder="留空表示不修改"></label>
+                  <label class="toggle-field"><input name="stream" type="checkbox"><span class="toggle-ui"></span><span><strong>启用流式输出</strong><small>逐步接收模型响应</small></span></label>
+                </div>
+              </section>
+              <section class="card form-card">
+                <div class="form-section-title"><span class="section-icon blue">⌘</span><div><h2>执行资源</h2><p>控制并行构建、审查与单次执行时长。</p></div></div>
+                <div class="form-grid three-col">
+                  <label class="field">运行模式<select name="mode"><option value="responses">Responses API · 真实模型</option><option value="fake">Fake · 固定演示流程</option></select><span class="field-hint">Fake 仅用于本地演示，不会调用真实模型。</span></label>
+                  <label class="field">构建并行数<input name="builders" type="number" min="1" max="2" step="1"></label>
+                  <label class="field">审查并行数<input name="reviewers" type="number" min="1" max="2" step="1"></label>
+                  <label class="field">单次时长（分钟）<input name="attempt_minutes" type="number" min="1" step="1"></label>
+                </div>
+              </section>
+              <section class="card form-card">
+                <div class="form-section-title"><span class="section-icon amber">◷</span><div><h2>调用预算</h2><p>为 Issue 和每日总量设置执行上限。</p></div></div>
+                <div class="form-grid three-col">
+                  <label class="field">单 Issue 调用数<input name="issue_calls" type="number" min="1" step="1"></label>
+                  <label class="field">每日调用数<input name="daily_calls" type="number" min="1" step="1"></label>
+                  <label class="field">单 Issue 时长（分钟）<input name="issue_minutes" type="number" min="1" step="1"></label>
+                  <label class="field">最大尝试次数<input name="max_attempts" type="number" min="1" step="1"></label>
+                  <label class="field">最大修复轮数<input name="max_fix_rounds" type="number" min="0" step="1"></label>
+                  <label class="field">输入价格 / 百万 Token<input name="input_price_per_million" type="number" min="0" step="0.001"></label>
+                  <label class="field">输出价格 / 百万 Token<input name="output_price_per_million" type="number" min="0" step="0.001"></label>
+                </div>
+              </section>
+              <div class="settings-footer"><p class="form-message" id="settings-message" role="status"></p><button class="button button-primary" type="submit" id="save-settings">保存设置 <span aria-hidden="true">→</span></button></div>
+            </form>
+            <aside class="settings-aside">
+              <section class="card form-card github-settings">
+                <div class="form-section-title"><span class="section-icon blue">⌘</span><div><h2>GitHub App</h2><p>查看应用与仓库安装绑定。</p></div></div>
+                <label class="field">公开 Webhook URL<input id="github-public-url" type="url" placeholder="https://your-tunnel.example"></label>
+                <div class="github-identifiers" id="github-identifiers"></div>
+                <button class="button button-secondary button-wide" id="discover-github" type="button">发现安装</button>
+                <div id="installation-picker" hidden>
+                  <label class="field">选择安装<select id="installation-select"><option value="">未发现安装</option></select></label>
+                  <button class="button button-primary button-wide" id="bind-installation" type="button">绑定所选安装</button>
+                </div>
+                <p class="form-message" id="github-message" role="status"></p>
+              </section>
+              <div class="card tip-card"><span class="tip-icon">i</span><h3>安全提示</h3><p>访问 Token 使用密码输入框，只在提交设置时发送。页面不会读取已有密钥，也不会将密钥写入浏览器存储。</p></div>
+              <div class="card tip-card setup-tip"><span class="tip-icon">↗</span><h3>GitHub App 尚未配置？</h3><p>前往注册页创建 App，并配置 Webhook 与安装权限。</p><a href="/setup" class="inline-link">打开注册页 <span>→</span></a></div>
+              <div class="card diagnostic-card" id="doctor-result" hidden></div>
+            </aside>
+          </div>
+        </section>
+      </div>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </main>
+  </div>
+  <div class="evidence-dialog" id="evidence-dialog" role="dialog" aria-modal="true" aria-labelledby="evidence-title" hidden>
+    <section class="evidence-window">
+      <header><div><p class="eyebrow">验证产物</p><h2 id="evidence-title">证据内容</h2></div><button class="icon-button" id="evidence-close" type="button" aria-label="关闭">×</button></header>
+      <pre id="evidence-content">正在读取…</pre>
+    </section>
+  </div>
+</body>
+</html>

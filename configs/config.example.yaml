@@ -1,0 +1,42 @@
+listen: 0.0.0.0:8080
+setup_listen: 0.0.0.0:8081
+data_dir: /data
+github:
+  app_id: 0
+  private_key_file: /secrets/github-app.pem
+  webhook_secret_file: /secrets/webhook-secret
+  installation_id: 0
+  api_url: https://api.github.com
+  public_url: "" # temporary tunnel HTTPS URL, webhook path appended automatically
+model:
+  base_url: "" # e.g. https://your-provider.example/v1
+  token_file: /secrets/model-token
+  dev: "" # fill in your provider's model name
+  review: ""
+  stream: true
+  max_output_tokens: 8192
+runner:
+  mode: responses # fake runs deterministic fixture without API credentials
+  image: ai-workflow-runner:local
+  builders: 2
+  reviewers: 2
+  attempt_minutes: 30
+budget:
+  issue_calls: 80
+  daily_calls: 500
+  issue_minutes: 120
+  max_attempts: 2
+  max_fix_rounds: 2
+  input_price_per_million: 0 # zero means unknown, not free
+  output_price_per_million: 0
+repositories:
+  - name: ycychome/ai-workflow-pilot
+    id: 0 # bind numeric ID after installation discovery
+    base_branch: main
+    maintainers: [zymooll]
+    allowed_paths: ["**"]
+    protected_paths: [".github/**"]
+    policy_version: v1
+    verification:
+      - [go, test, ./...]
+      - [go, vet, ./...]
