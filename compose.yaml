@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    env_file:
+      - ./secrets/postgres.env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [control]
+
+  control:
+    image: ai-workflow-control:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./secrets/control.env
+    environment:
+      CONFIG_FILE: /secrets/config.yaml
+      DATA_DIR: /data
+      HTTP_ADDR: 0.0.0.0:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ./secrets:/secrets:rw
+      - control-data:/data
+    networks: [control]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Build this profile before starting control. The service is never started;
+  # only the immutable local image tag is used for worker containers.
+  runner-image:
+    image: ai-workflow-runner:local
+    build:
+      context: .
+      dockerfile: deploy/runner.Dockerfile
+    profiles: [images]
+
+volumes:
+  postgres-data:
+  control-data:
+
+networks:
+  control:
+    driver: bridge

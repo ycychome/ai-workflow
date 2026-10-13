@@ -1,0 +1,9 @@
+.git
+secrets
+data
+bin
+*.test
+.env
+.env.*
+.DS_Store
+**/.DS_Store
