@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -23,6 +24,49 @@ SCENARIOS = [
 # These entry points intentionally skip in the parent process; their owning
 # tests launch the same binary with an explicit child environment.
 PARENT_PROCESS_HELPERS = {'TestAgentQueueProcessWorker', 'TestAlphaAcceptanceQueueProcess'}
+MAX_FAILURE_DIAGNOSTIC_CASES = 16
+MAX_FAILURE_DIAGNOSTIC_CHARS_PER_CASE = 3000
+MAX_FAILURE_DIAGNOSTIC_TOTAL_CHARS = MAX_FAILURE_DIAGNOSTIC_CASES * MAX_FAILURE_DIAGNOSTIC_CHARS_PER_CASE
+
+def _redact_diagnostic(text):
+    text = re.sub(r'(?i)(postgres(?:ql)?://)[^:/@\s]+:[^@\s]+@', r'\1<redacted>@', text)
+    return re.sub(r'\bgh[pousr]_[A-Za-z0-9_]{20,}\b', '<redacted-token>', text)
+
+def format_failure_diagnostics(name, events, failed, returncode):
+    """Return bounded Go test output for failed cases, including process failures."""
+    failed = sorted(set(failed))
+    leaves = [test for test in failed if not any(other.startswith(test + '/') for other in failed)]
+    cases = leaves[:MAX_FAILURE_DIAGNOSTIC_CASES]
+    sections = []
+    if cases:
+        for test in cases:
+            output = ''.join(
+                event.get('Output', '') for event in events
+                if event.get('Action') == 'output' and event.get('Test') == test
+            )
+            if not output:
+                output = '(Go emitted no test output for this failed case)\n'
+            output = _redact_diagnostic(output)
+            if len(output) > MAX_FAILURE_DIAGNOSTIC_CHARS_PER_CASE:
+                output = output[:MAX_FAILURE_DIAGNOSTIC_CHARS_PER_CASE] + '\n...[case output truncated]'
+            sections.append(f'--- {test} ---\n{output}')
+    else:
+        # Build failures and test-binary crashes may have a non-zero exit code
+        # without a Go `fail` event. Preserve the final package/process output.
+        process_output = ''.join(
+            event.get('Output', '') for event in events if event.get('Action') == 'output'
+        )
+        if process_output:
+            process_output = _redact_diagnostic(process_output[-MAX_FAILURE_DIAGNOSTIC_CHARS_PER_CASE:])
+            sections.append(f'--- go test process output ---\n{process_output}')
+    if len(leaves) > len(cases):
+        sections.append(f'... {len(leaves) - len(cases)} additional failed cases omitted')
+    if not sections:
+        return ''
+    body = f'Go acceptance failure diagnostics for {name} (exit {returncode}):\n' + '\n'.join(sections)
+    if len(body) > MAX_FAILURE_DIAGNOSTIC_TOTAL_CHARS:
+        body = body[:MAX_FAILURE_DIAGNOSTIC_TOTAL_CHARS] + '\n...[diagnostics truncated]'
+    return body
 
 def summarize_events(name, events, returncode, matrix=False):
     passed = sorted({e['Test'] for e in events if e.get('Test') and e.get('Action') == 'pass'})
@@ -72,10 +116,14 @@ def run_go(args, name, packages, pattern=None, matrix=False):
         try:
             events.append(json.loads(line))
         except json.JSONDecodeError:
-            pass
+            events.append({'Action': 'output', 'Package': '<go test raw>', 'Output': line + '\n'})
     result = summarize_events(name, events, completed.returncode, matrix)
     result.update({'command': command, 'evidence': log.name,
                    'sha256': hashlib.sha256(log.read_bytes()).hexdigest()})
+    if result['status'] == 'failed':
+        diagnostic = format_failure_diagnostics(name, events, result['failed'], completed.returncode)
+        if diagnostic:
+            print(diagnostic, flush=True)
     return result
 
 def main():

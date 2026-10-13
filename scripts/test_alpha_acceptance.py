@@ -41,5 +41,31 @@ class AcceptanceSummaryTests(unittest.TestCase):
         result = acceptance.summarize_events('docker', [{'Action': 'pass', 'Test': 'TestOther'}], 1)
         self.assertEqual(result['status'], 'failed')
 
+    def test_failure_diagnostics_keep_assertion_and_timeout_output(self):
+        diagnostics = acceptance.format_failure_diagnostics('docker', [
+            {'Action': 'output', 'Test': 'TestJudge', 'Output': '--- FAIL: TestJudge\ncontext deadline exceeded\n'},
+        ], ['TestJudge'], 1)
+        self.assertIn('TestJudge', diagnostics)
+        self.assertIn('--- FAIL: TestJudge', diagnostics)
+        self.assertIn('context deadline exceeded', diagnostics)
+
+    def test_nonzero_process_without_fail_event_keeps_tail_output(self):
+        diagnostics = acceptance.format_failure_diagnostics('docker', [
+            {'Action': 'output', 'Test': 'TestJudge', 'Output': 'test started\n'},
+            {'Action': 'output', 'Package': 'orchestration', 'Output': 'go test timed out\n'},
+        ], [], 1)
+        self.assertIn('test started', diagnostics)
+        self.assertIn('go test timed out', diagnostics)
+
+    def test_failure_diagnostics_are_bounded_and_redact_database_credentials(self):
+        diagnostics = acceptance.format_failure_diagnostics('docker', [
+            {'Action': 'output', 'Test': 'TestJudge',
+             'Output': 'postgres://acceptance:private-password@127.0.0.1:5432/acceptance\n' + 'x' * 5000},
+        ], ['TestJudge'], 1)
+        self.assertIn('[case output truncated]', diagnostics)
+        self.assertIn('postgres://<redacted>@', diagnostics)
+        self.assertNotIn('private-password', diagnostics)
+        self.assertLessEqual(len(diagnostics), acceptance.MAX_FAILURE_DIAGNOSTIC_CHARS_PER_CASE + 200)
+
 if __name__ == '__main__':
     unittest.main()

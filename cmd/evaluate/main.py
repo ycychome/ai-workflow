@@ -119,7 +119,11 @@ class Control:
             result = response.read(32 << 20)
             if len(result) == 32 << 20:
                 raise ValueError("API 响应超过大小限制")
-            return result if raw else json.loads(result)
+            if raw:
+                return result
+            if not result.strip():
+                return None
+            return json.loads(result)
 
 def record_result(control, trial, snapshot, out):
     workflow = snapshot["workflow"]

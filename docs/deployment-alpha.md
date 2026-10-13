@@ -102,3 +102,5 @@ Docker Go 测试默认用 `ai-workflow-runner:local`；它与部署配置的 alp
 适配器先核验当次人类操作员是所有者 `zymooll`／`51841832` 且具有目标仓库 admin 权限，再用 App JWT 验证该仓库的 installation／App 身份，并申请只限该仓库的 `actions:read`、`contents:read`、`pull_requests:read` 安装令牌。只读远端核验使用此令牌；安装经哈希固定的 CI 文件、创建冻结 Git 对象／引用及审查 PR 使用已核验的操作员凭据。操作员凭据通过 `PILOT_EVAL_WRITE_TOKEN(_FILE)` 独立设置，未设置则读取 github.com Git credential helper；需具备写入 workflow 文件的权限，App 不需要新增 `workflows:write`。评估不会构造重置维护 Adapter，也不需要登录维护控制面。`pilot-reset.py` 与管理重置适配器的旧仓库边界保持不变。
 
 原组织 installation `170592609` 的添加请求被 GitHub 以 403 拒绝，用户随后改用个人账号新建的测试仓库。安装现有 Public App `5285791` 时选择 `zymooll`、`Only select repositories` 并仅勾选 `ai-workflow-alpha-test`；重新取得个人 installation ID，不能沿用组织安装 ID。评估仍需真实安装核验，不能用管理员写入替代 App 联调。当前证据及剩余正式验收见 [alpha-acceptance.md](alpha-acceptance.md)。
+
+个人安装已完成：App `5285791`，installation `170932429`，仅授权 `zymooll/ai-workflow-alpha-test`。评估 CLI 已兼容真实 `/api/login` 的 HTTP 204 空响应并保持会话 Cookie。运行前继续对照当前有效配置摘要及按日累计额度，不沿用组织安装 ID。

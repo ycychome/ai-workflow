@@ -1,6 +1,6 @@
 # Alpha 集中验收记录
 
-状态：**PR #3 已接手续验，已创建个人测试仓库并转接验收，App 安装待确认，完整 Alpha 尚未正式放行**。实现阶段结束后统一运行测试。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
+状态：**PR #3 已接手续验，个人 App 已安装，真实联调与 CI 诊断进行中，完整 Alpha 尚未正式放行**。实现阶段结束后统一运行测试。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
 
 ## 已取得的本地证据
 
@@ -39,7 +39,7 @@
 
 ## 尚待完成
 
-- 真实联调目标为用户指定的 `ycychome/test-repo-for-ai-test`；用户随后改为个人账号测试仓库，已创建 `zymooll/ai-workflow-alpha-test`（`1416790756`），评估入口固定到该目标，App 安装待完成。旧 pilot 未重置。
+- 真实联调目标为用户指定的 `ycychome/test-repo-for-ai-test`；用户随后改为个人账号测试仓库，已创建 `zymooll/ai-workflow-alpha-test`（`1416790756`），评估入口固定到该目标，个人 App 安装已完成并核验为仅限该仓库；真实联调进行中。旧 pilot 未重置。
 - 真实 GitHub App／可信 CI 签发与最终门禁联调。
 - 十项真实冒烟、九十次同预算开发对照、二十个固定候选审查、维护者标签校核和人工合并。
 
@@ -68,3 +68,11 @@
 安装范围补齐后，顺序为：重新核验 App 身份 → 安装固定可信 CI 与独立基线 → 隔离部署并核对有效配置／当前额度 → 真实 GitHub App／宿主签发与最终门禁联调 → 十项冒烟 → 九十次对照及二十个盲审 → 维护者标签校核与人工合并。App／CI、模型结果、人工标签和人工合并仍为未验收；适配器离线测试没有将这些条目标为通过。
 
 远端接手时 HEAD `d422ff5` 的 [Actions run 38375368409](https://github.com/ycychome/ai-workflow/actions/runs/38375368409) 已结束：`control/checks` 通过，隔离验收失败。后者的 unit、PostgreSQL 和 T01–T28 层通过，Docker Judge 层失败；原日志只有失败名称而没有原始 Go 输出，不能据此确认根因。相同失败入口在独立 Colima／PG 定向复跑全部通过（隐藏判定 39.75 秒、伪造用例 92.85 秒、20 候选 291.19 秒）。本轮只增加总是上传 CI 验收 JSONL／摘要的步骤，不降低 Judge 断言或把未复现的远端失败记成通过；后续运行以远端完整证据为准。
+
+个人 App 安装已经用户确认并完成本人认证，installation ID 为 `170932429`，已通过 UI 和实际 API 双重核验，仅选中 `zymooll/ai-workflow-alpha-test`。19 个基线／公开 CI 文件已在私有仓库精确读回；初始 source commit `94a8fc03fc71376557724dfdd239de2699794b4d`，workflow ID `383067637`，workflow blob `2f7d44396075f4a0a5ec6fb21fdac6d4e99aa292`。
+
+已启动独立 native 控制器（loopback 28080／28081）和独立 Colima PostgreSQL，实际 `/readyz` 200、登录 204 后持有 session 并成功读有效配置。真实登录暴露了评估 CLI 对空 204 响应解码失败的问题，已修复并用真实 loopback HTTP＋Cookie 回归验证。原数据库只为只读额度核验短暂启动，读取后恢复原停止状态；原控制器未启动。验收库保留 2026-10-13 已用 79 次调用，不以新库清零每日额度。
+
+真实 `connection-T01-001` 为独立接线探针，不计入十项正式冒烟或九十次对照；实际模型为 `deepseek-v4.1-flash`，已完成 triage／dev_planner 并进入 builder，尚无最终结论。有效配置摘要为 `e0e999c03544aac85929ecdd525f5882bb91cee78165aec2ebe4ecb12c42caed`；最终正式矩阵仍须在接线冻结后生成。证据位于 `live-runtime-001/`。
+
+远端 [run 38380058253](https://github.com/ycychome/ai-workflow/actions/runs/38380058253) 再次在 Docker Judge 层失败；artifact 上传另因 GitHub 存储配额已满而失败。已改为在控制台保留有界的真实失败输出，并允许 artifact 上传独立失败；核心测试的失败退出与 incomplete 判定不变。下一轮须依据实际诊断确定原因，不能删除远端数据、绕过测试或把 artifact 配额问题当作测试通过。

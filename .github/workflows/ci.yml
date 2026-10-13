@@ -59,6 +59,7 @@ jobs:
       - name: Preserve isolated acceptance evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        continue-on-error: true
         with:
           name: isolated-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/alpha-acceptance-ci/
