@@ -6,16 +6,19 @@
 
 | 范围 | 当前结果 | 证据目录（工作区上级 `acceptance-evidence/`） |
 |---|---|---|
+| 最终完整 Go race | 577 个含子用例通过，0 失败，无数据竞争；2 个父进程 helper 跳过，其主用例通过；启用全部 PostgreSQL／Docker 用例 | `final-race-all-001/` |
 | Go 单元层 | 325 个含子用例通过；数据库／Docker 用例按层隔离，未将跳过视作其验收通过 | `unit-004/` |
 | Store PostgreSQL 与 race | 各 50 个含子用例通过；两个父层跳过项是由主用例启动的子进程 helper | `store-sandbox-20261013/` |
 | Sandbox Docker race | 33 个含子用例通过，无跳过；含只读源码、独立补充测试目录、peer 隔离及停止日志保留 | `store-sandbox-20261013/` |
-| 架构 T01–T28 | 28 个场景全部通过，无跳过；真实 PostgreSQL／Docker，GitHub 故障由本地 HTTP 服务注入 | `matrix-001/` |
+| 架构 T01–T28 | 28 个场景全部通过，无跳过；真实 PostgreSQL／Docker，GitHub 故障由本地 HTTP 服务注入 | `final-all-001/`、最终完整 race |
 | CI 身份、等待与恢复 | 70 个单元子用例及 6 项 PostgreSQL／Docker 回归通过；覆盖崩溃幂等计时与真实集成树 | `trust-chain-unit-20261013/`、`trust-chain-pg-20261013/` |
 | Python 评估、重置及验收汇总 | 27 项评估／适配器离线测试与 6 项验收汇总回归通过；未作为远端操作证据 | `final-static-001/`、`scripts/test_alpha_acceptance.py` |
 | 生产型工单独立判定 | 20 个缺陷／修复候选均符合机械判定；判定器独立模块与进程，候选无法伪造输出；人工标签仍待校核 | `judge-external-migration-001/`、`python-evaluation/judge-adversarial-final.jsonl` |
 | 完整 Fake 工作流 | 真实 PostgreSQL／Docker，从分诊至独立审查、Skeptic 和合并门禁；不调用真实模型或 GitHub | `trust-chain-regressions-003/` |
 | 中文控制台 | 实际登录、创建演示、动态任务图、运行队列、排队后复查提示；并发上限保存重载后保留；浏览器未报告 JS 错误 | `ui-runtime/` |
 | Alpha 运维恢复 | init／prewarm／up、备份、实际修改后的恢复与再次健康检查通过；数据库、配置、文件一致，schema 1–9 恢复 | `alpha-ops-20261013/` |
+
+最终完整命令为 `AI_WORKFLOW_FORCE_INTEGRATION=1 AI_WORKFLOW_FORCE_DOCKER=1 go test -race -count=1 -timeout=20m ./...`，使用独立数据库配置。用时 561 秒；本机 Go 1.27.2，Linux runner 容器。此前 `final-all-001` 的数据库层曾因时钟偏差失败，已修复并在最终全量中通过；原失败记录保留。GitHub Actions 使用 Go 1.24，远端执行结果以 PR 检查为准。
 
 证据保存首次失败和修复后结果，不覆盖原日志。JSON 汇总附日志哈希。隔离环境使用独立 Colima profile `aiwf-alpha-acceptance`、专用 PostgreSQL 和合成凭据，原服务保持运行。临时环境文件含测试凭据，不应提交到 Git。
 
