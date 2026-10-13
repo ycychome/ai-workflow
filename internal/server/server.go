@@ -46,7 +46,9 @@ type pendingState struct{ expires time.Time }
 
 type workflowStateView struct {
 	domain.Workflow
-	Scheduling store.Scheduling `json:"scheduling"`
+	Scheduling               store.Scheduling `json:"scheduling"`
+	ForceApprovalCurrent     bool             `json:"force_approval_current"`
+	IssueMatchesApprovedSpec bool             `json:"issue_matches_approved_spec"`
 }
 
 // Handlers owns the two HTTP surfaces used by the control process.
@@ -350,7 +352,7 @@ func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
 		if wf.Generation > maxGeneration {
 			maxGeneration = wf.Generation
 		}
-		views = append(views, workflowStateView{Workflow: wf, Scheduling: scheduling[wf.ID]})
+		views = append(views, workflowStateView{Workflow: wf, Scheduling: scheduling[wf.ID], ForceApprovalCurrent: h.engine.ForceApprovalCurrent(ctx, wf), IssueMatchesApprovedSpec: h.engine.IssueMatchesApprovedSpec(wf)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workflows": views, "health": h.basicHealth(ctx, cfg), "config": publicConfig(cfg), "generation": maxGeneration})
 }
@@ -391,7 +393,7 @@ func publicConfig(cfg config.Config) map[string]any {
 	return map[string]any{
 		"github":       map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL, "configured": cfg.GitHub.AppID > 0},
 		"model":        map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "attempt_minutes": cfg.Runner.AttemptMinutes},
+		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "attempt_minutes": cfg.Runner.AttemptMinutes},
 		"budget":       map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		"repositories": repos,
 	}
@@ -410,11 +412,12 @@ type settingsUpdate struct {
 		Token           string  `json:"token"`
 	} `json:"model"`
 	Runner struct {
-		Mode                *string `json:"mode"`
-		Builders            *int    `json:"builders"`
-		Reviewers           *int    `json:"reviewers"`
-		WorkflowConcurrency *int    `json:"workflow_concurrency"`
-		AttemptMinutes      *int    `json:"attempt_minutes"`
+		Mode                     *string `json:"mode"`
+		Builders                 *int    `json:"builders"`
+		Reviewers                *int    `json:"reviewers"`
+		WorkflowConcurrency      *int    `json:"workflow_concurrency"`
+		RequireAcceptForAnalysis *bool   `json:"require_accept_for_analysis"`
+		AttemptMinutes           *int    `json:"attempt_minutes"`
 	} `json:"runner"`
 	Budget struct {
 		IssueCalls   *int     `json:"issue_calls"`
@@ -434,7 +437,7 @@ func (h *Handlers) settings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"github": map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL},
 			"model":  map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "attempt_minutes": cfg.Runner.AttemptMinutes},
+			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "attempt_minutes": cfg.Runner.AttemptMinutes},
 			"budget": map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		})
 	case http.MethodPost:
@@ -492,6 +495,9 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.Runner.WorkflowConcurrency != nil {
 		cfg.Runner.WorkflowConcurrency = *update.Runner.WorkflowConcurrency
+	}
+	if update.Runner.RequireAcceptForAnalysis != nil {
+		cfg.Runner.RequireAcceptForAnalysis = *update.Runner.RequireAcceptForAnalysis
 	}
 	if update.Runner.AttemptMinutes != nil {
 		cfg.Runner.AttemptMinutes = *update.Runner.AttemptMinutes
@@ -636,18 +642,50 @@ func (h *Handlers) command(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	var body struct {
-		Command string `json:"command"`
+		Command            string  `json:"command"`
+		ExpectedGeneration *int64  `json:"expected_generation,omitempty"`
+		ExpectedHeadSHA    *string `json:"expected_head_sha,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid command JSON")
 		return
 	}
-	allowed := map[string]bool{"status": true, "pause": true, "resume": true, "cancel": true, "replan": true, "review deep": true, "takeover": true, "accept": true, "reject": true, "defer": true}
+	allowed := map[string]bool{"status": true, "pause": true, "resume": true, "cancel": true, "replan": true, "review deep": true, "takeover": true, "accept": true, "analyze": true, "forceaccept": true, "forceaccept dev": true, "forceaccept merge": true, "reject": true, "defer": true}
 	if !allowed[body.Command] {
 		writeError(w, http.StatusBadRequest, "unsupported workflow command")
 		return
 	}
-	if err := h.engine.Command(r.Context(), id, "local-dashboard", body.Command, true); err != nil {
+	forceCommand := strings.HasPrefix(body.Command, "forceaccept")
+	if forceCommand && (body.ExpectedGeneration == nil || body.ExpectedHeadSHA == nil) {
+		writeError(w, http.StatusBadRequest, "forceaccept requires expected_generation and expected_head_sha from the confirmed workflow state")
+		return
+	}
+	if body.ExpectedGeneration != nil {
+		current, getErr := h.engine.Store.Get(r.Context(), id)
+		if getErr != nil {
+			writeError(w, http.StatusConflict, "workflow changed before command confirmation")
+			return
+		}
+		if current.Generation != *body.ExpectedGeneration {
+			writeError(w, http.StatusConflict, "workflow generation changed; review the current state and confirm again")
+			return
+		}
+		if body.ExpectedHeadSHA != nil && current.HeadSHA != *body.ExpectedHeadSHA {
+			writeError(w, http.StatusConflict, "pull request head changed; review the current state and confirm again")
+			return
+		}
+	}
+	commandCtx := r.Context()
+	if body.ExpectedGeneration != nil {
+		commandCtx = orchestration.WithExpectedGeneration(commandCtx, *body.ExpectedGeneration)
+	}
+	if body.ExpectedHeadSHA != nil {
+		commandCtx = orchestration.WithExpectedHead(commandCtx, *body.ExpectedHeadSHA)
+	}
+	if body.ExpectedGeneration != nil && body.ExpectedHeadSHA != nil {
+		commandCtx = store.WithExpectedState(commandCtx, *body.ExpectedGeneration, *body.ExpectedHeadSHA)
+	}
+	if err := h.engine.Command(commandCtx, id, "local-dashboard", body.Command, true); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}

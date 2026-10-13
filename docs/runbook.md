@@ -111,8 +111,11 @@ processing is at least once; uncertain GitHub writes require reconciliation.
 At startup and every 60 seconds, the service also discovers open Issues from each
 configured repository. Each pass reads the newest page and one rotating historical
 page (100 records per page), excludes pull requests, and creates missing Issues
-only in INTAKE. This repairs missed opening events without authorizing model work
-or replaying old comment commands. Recovery and discovery errors appear in audit.
+according to the intake policy. By default new Issues enter TRIAGE automatically.
+Enable **Require acceptance before analysis** in Budget and execution settings to
+keep them in INTAKE until a Maintainer issues `/ai accept`. Neither policy approves
+development specifications or replays old comment commands. Recovery and
+discovery errors appear in audit.
 
 MVP worker settings allow up to two builders and two reviewers. Work remains
 bound to a generation, lease, path scope, and verification identity. A passing
@@ -133,6 +136,13 @@ A passing PR stays available for human review while another Issue can run. When
 a merge changes the target branch, affected candidates must be reverified using
 the new base/head identity; paused and human-owned workflows remain under their
 existing control state. Workflow concurrency never enables automatic merge.
+
+A Maintainer may issue `/ai forceaccept` (also available in the workflow Web
+actions) to force an Issue into development planning or to allow its current PR
+through this system's merge gate. The forced decision is attributed and tied to
+the current candidate identity; verification and review evidence remain truthful.
+It does not merge the PR or alter GitHub's other required checks. Changing the
+base, head, specification or policy invalidates the current forced approval.
 
 ## Backup, restore, and shutdown
 

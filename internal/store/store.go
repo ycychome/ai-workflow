@@ -17,6 +17,17 @@ var ErrNoChange = errors.New("workflow update has no changes")
 type Store struct{ DB *pgxpool.Pool }
 
 type commandContextKey struct{}
+type expectedWorkflowState struct {
+	Generation int64
+	HeadSHA    string
+}
+type expectedStateContextKey struct{}
+
+// WithExpectedState binds a user-confirmed command to the workflow snapshot
+// observed by the client. Update rechecks this while holding the workflow row lock.
+func WithExpectedState(ctx context.Context, generation int64, headSHA string) context.Context {
+	return context.WithValue(ctx, expectedStateContextKey{}, expectedWorkflowState{Generation: generation, HeadSHA: headSHA})
+}
 
 // WithCommand marks an Update as the transactional effect of a user command.
 // The command key is stored alongside workflow changes and actions so retries
@@ -356,6 +367,13 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 	if err != nil {
 		return err
 	}
+	if expected, ok := ctx.Value(expectedStateContextKey{}).(expectedWorkflowState); ok && (w.Generation != expected.Generation || w.HeadSHA != expected.HeadSHA) {
+		return ErrStale
+	}
+	oldPhase := w.Phase
+	oldControl := w.Control
+	oldReview, _ := json.Marshal(w.Review)
+	oldForceApproval := domain.Digest(w.ForceApproval)
 	if key := commandKey(ctx); key != "" {
 		tag, err := tx.Exec(ctx, `INSERT INTO processed_commands(command_id,workflow_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, key, id)
 		if err != nil {
@@ -365,7 +383,7 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 			return nil
 		}
 	}
-	oldGeneration, oldControl := w.Generation, w.Control
+	oldGeneration := w.Generation
 	actions, err := fn(&w)
 	if err != nil {
 		if errors.Is(err, ErrNoChange) {
@@ -391,6 +409,38 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 	}
 	if err = insertActions(ctx, tx, actions); err != nil {
 		return err
+	}
+	if w.ForceApproval != nil && domain.Digest(w.ForceApproval) != oldForceApproval {
+		kind := "force_accept_issue_development"
+		if w.ForceApproval.Kind == "pr_merge_gate" {
+			kind = "force_accept_pr_gate"
+		}
+		payload, marshalErr := json.Marshal(map[string]any{
+			"actor": w.ForceApproval.Actor, "command": w.ForceApproval.Command,
+			"approved_at": w.ForceApproval.ApprovedAt, "old_phase": oldPhase, "old_control": oldControl, "old_review": json.RawMessage(oldReview),
+			"pr": w.PR, "prior_constraints": w.ForceApproval.PriorConstraints,
+			"discussion_context": w.ForceApproval.Discussion,
+			"generation":         w.Generation, "spec_digest": w.ForceApproval.SpecDigest,
+			"policy_digest": w.ForceApproval.PolicyDigest, "verification_key": w.ForceApproval.VerificationKey,
+			"issue_hash": w.ForceApproval.IssueHash, "base_sha": w.ForceApproval.BaseSHA,
+			"head_sha": w.ForceApproval.HeadSHA, "bypassed": w.ForceApproval.Bypassed,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err = tx.Exec(ctx, "INSERT INTO audit(workflow_id,kind,data) VALUES($1,$2,$3)", id, kind, payload); err != nil {
+			return err
+		}
+		if w.ForceApproval.Kind == "pr_merge_gate" {
+			decision := domain.GateDecision{ID: domain.Digest([]any{w.ID, w.Generation, w.ForceApproval.VerificationKey, "FORCED"}), WorkflowID: w.ID, Generation: w.Generation, VerificationKey: w.ForceApproval.VerificationKey, SpecDigest: w.Spec.Digest, BaseSHA: w.BaseSHA, HeadSHA: w.HeadSHA, Verdict: "FORCED", Reason: "explicit maintainer override; automated review/verification was bypassed", Evidence: w.Evidence, Coverage: w.Review.Obligations, Findings: w.Review.Findings, CreatedAt: w.ForceApproval.ApprovedAt}
+			decisionPayload, decisionErr := json.Marshal(decision)
+			if decisionErr != nil {
+				return decisionErr
+			}
+			if _, err = tx.Exec(ctx, "INSERT INTO gate_decisions(id,workflow_id,generation,verification_key,data) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", decision.ID, w.ID, w.Generation, decision.VerificationKey, decisionPayload); err != nil {
+				return err
+			}
+		}
 	}
 	if err = obsoleteUnstartedActions(ctx, tx, id, oldGeneration, oldControl, w.Generation, w.Control); err != nil {
 		return err

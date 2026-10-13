@@ -159,7 +159,7 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.ProposalSpec = nil
 			x.Generation++
 			x.Control = "PAUSING"
-			x.LastError = "Issue changed; maintainer acceptance is required before specification updates."
+			x.LastError = "Issue changed; after controls settle, use /ai analyze to request a proposal. The accepted specification remains unchanged until /ai accept."
 			x.Discussion = append(x.Discussion, "Issue edit proposal detected during reconciliation.")
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
@@ -224,6 +224,7 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.Generation++
 			x.HeadSHA = pr.Head.SHA
 			x.Control = "PAUSING"
+			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "pull request head changed outside the current workflow generation"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}

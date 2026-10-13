@@ -12,7 +12,8 @@
   const controlNames = { ACTIVE: "可执行", PAUSING: "暂停中", PAUSED: "已暂停", CANCELLING: "取消中", CANCELLED: "已取消", TAKEOVER: "人工接管", HUMAN_OWNED: "人工控制", COMPLETED: "已完成" };
   const commandNames = {
     status: "刷新状态", pause: "暂停", resume: "继续", cancel: "取消", replan: "重新规划",
-    "review deep": "深度审查", takeover: "人工接管", accept: "接受结果", reject: "拒绝结果", defer: "稍后处理"
+    "review deep": "深度审查", takeover: "人工接管", analyze: "开始需求分析", accept: "批准进入开发",
+    forceaccept: "强制放行", reject: "拒绝结果", defer: "稍后处理"
   };
   const healthNames = { database: "数据库", github: "GitHub", model: "模型服务", sandbox: "隔离执行" };
   const state = { workflows: [], health: {}, config: {}, selected: "", authenticated: false, settingsLoaded: false, auditEntries: [], route: null };
@@ -245,7 +246,7 @@
     row.dataset.workflowId = workflow.id;
     if (workflow.id === state.selected) row.classList.add("selected");
     const first = document.createElement("td"); first.append(workflowNameCell(workflow)); row.append(first);
-    const phase = document.createElement("td"); phase.append(statusBadge(workflow.phase, phaseLabel(workflow.phase))); appendSchedulingStatus(phase, workflow, true); row.append(phase);
+    const phase = document.createElement("td"); phase.append(statusBadge(workflow.phase, phaseLabel(workflow.phase))); appendSchedulingStatus(phase, workflow, true); appendForceApprovalStatus(phase, workflow); row.append(phase);
     const control = document.createElement("td"); control.append(statusBadge(workflow.control, controlLabel(workflow.control))); row.append(control);
     if (detailed) {
       const gen = document.createElement("td"); gen.append(el("span", "numeric-cell", `G${text(workflow.generation, 0)} · ${workflow.pr ? `#${workflow.pr}` : "无 PR"}`)); row.append(gen);
@@ -370,6 +371,37 @@
       }
     }
     if (refs.childNodes.length) notice.append(refs);
+    return notice;
+  }
+
+  function appendForceApprovalStatus(container, workflow) {
+    const approval = workflow.force_approval;
+    if (!approval) return;
+    if (approval.kind === "issue_development") {
+      container.append(statusBadge("human", "强制进入开发"));
+      return;
+    }
+    const current = approval.kind === "pr_merge_gate" && workflow.force_approval_current === true;
+    container.append(statusBadge(current ? "human" : "stale", current ? "人工强制放行" : "历史强制放行"));
+  }
+
+  function forceApprovalNotice(workflow) {
+    const approval = workflow.force_approval;
+    if (!approval) return null;
+    const current = approval.kind === "pr_merge_gate" && workflow.force_approval_current === true;
+    const notice = el("aside", `force-approval-notice${current ? " current" : " historical"}`);
+    const title = approval.kind === "pr_merge_gate"
+      ? (current ? "人工强制放行 · 当前候选" : "历史强制放行 · 不代表当前门禁通过")
+      : "强制进入开发记录";
+    notice.append(el("strong", "", title));
+    notice.append(el("p", "", `操作者：${text(approval.actor, "未知")} · 时间：${formatTime(approval.approved_at)} · 代次：${text(approval.generation, "—")}`));
+    if (approval.kind === "pr_merge_gate") {
+      notice.append(el("p", "", `验证身份：${text(approval.verification_key, "未提供")} · Base ${text(approval.base_sha, "—")} · Head ${text(approval.head_sha, "—")}`));
+      if (approval.bypassed?.length) notice.append(el("p", "", `本次跳过：${approval.bypassed.map(item => text(item)).join("、")}`));
+      notice.append(el("p", "", "此操作只覆盖本系统的合并门禁；GitHub 其他必需检查仍适用，实际合并仍由维护者执行。它不会把本地评审、可信验证或 Skeptic 结果标记为通过。"));
+    } else {
+      notice.append(el("p", "", `Issue #${text(workflow.issue)} · 问题摘要身份：${text(approval.issue_hash, "未提供")} · 本次跳过：${(approval.bypassed || []).map(text).join("、") || "无"}`));
+    }
     return notice;
   }
 
@@ -632,6 +664,7 @@
           (node === "reviewer2" && reviewerTasks[1]?.status === "ACCEPTED") ||
           (node === "skeptic" && w.review?.skeptic_complete) ||
           (node === "verify" && w.review?.verification_passed))) status = "stale";
+    if (node === "gate" && !gatePassed && w.force_approval?.kind === "pr_merge_gate") status = w.force_approval_current === true ? "human" : "stale";
     if (w.scheduling?.status === "queued" && status === "active") status = "pending";
     return status;
   }
@@ -880,10 +913,14 @@
   }
 
   function gatePassedLabel(w) {
+    const checkCurrent = Boolean(w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase());
+    const remotePassed = checkCurrent && w.control === "ACTIVE" && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() === "success";
+    if (remotePassed && flowReviewEligibleForGate(w)) return "成功";
+    if (w.force_approval?.kind === "pr_merge_gate" && w.force_approval_current === true) return "人工强制放行";
+    if (w.force_approval?.kind === "pr_merge_gate") return "历史强制放行";
+    if (w.check_sha && w.head_sha && !checkCurrent) return "旧提交";
     if (!w.check_sha || !w.head_sha) return "尚未确认";
     if (w.check_sha.toLowerCase() !== w.head_sha.toLowerCase()) return "旧提交";
-    const remotePassed = w.control === "ACTIVE" && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() === "success";
-    if (remotePassed && flowReviewEligibleForGate(w)) return "成功";
     if (remotePassed && w.review?.verdict === "OBSOLETE") return "审查已过期";
     if (remotePassed) return "本地审查未确认";
     return gateLabel(w.gate_status, w.gate_conclusion);
@@ -937,6 +974,60 @@
     return [control, phase, review, gate].filter(Boolean).join(" ");
   }
 
+  function isStoppedOrOwned(w) {
+    return ["CANCELLING", "CANCELLED", "HUMAN_OWNED", "TAKEOVER", "COMPLETED"].includes(w.control) || w.phase === "MERGED";
+  }
+
+  function canAnalyze(w) {
+    if (isStoppedOrOwned(w)) return false;
+    if (["INTAKE", "NEEDS_INFO"].includes(w.phase)) return true;
+    return w.control === "PAUSED" && Boolean(w.spec?.approved) && w.issue_matches_approved_spec === false;
+  }
+
+  function validProposalSpec(spec) {
+    if (!spec || !String(spec.title || "").trim() || !String(spec.description || "").trim()) return false;
+    const criteria = Array.isArray(spec.criteria) ? spec.criteria : [];
+    return criteria.length > 0 && criteria.every(item => String(item.id || "").trim() && String(item.description || "").trim()) &&
+      new Set(criteria.map(item => String(item.id).trim())).size === criteria.length;
+  }
+
+  function canAcceptProposal(w) {
+    return w.phase === "SPEC_READY" && !isStoppedOrOwned(w) && validProposalSpec(w.proposal_spec);
+  }
+
+  function forceAcceptanceKind(w) {
+    if (isStoppedOrOwned(w)) return "";
+    if (w.pr && !w.merged && !["closed", "merged"].includes(String(w.pr_state || "").toLowerCase()) &&
+        ["VERIFYING", "REVIEWING", "CHANGES_REQUESTED", "BLOCKED", "AWAITING_MAINTAINER"].includes(w.phase)) return "pr_merge_gate";
+    if (!w.pr && ["INTAKE", "TRIAGE", "NEEDS_INFO", "SPEC_READY", "PLANNING"].includes(w.phase)) return "issue_development";
+    return "";
+  }
+
+  function proposalApprovalCard(w) {
+    const section = el("section", "approval-card");
+    section.append(el("div", "approval-heading", "规格审批"));
+    const canApprove = canAcceptProposal(w);
+    if (w.phase === "SPEC_READY" && w.proposal_spec) {
+      section.append(el("p", "", "确认提案规格后，工作流才会进入开发计划。"));
+      const proposal = el("div", "proposal-content");
+      proposal.append(el("h4", "", text(w.proposal_spec.title, "未命名方案")), el("p", "", text(w.proposal_spec.description, "暂无方案说明")));
+      proposal.append(el("strong", "subsection-title", "验收标准"), criteriaList(w.proposal_spec));
+      if (w.proposal_spec.non_goals?.length) proposal.append(el("p", "", `非目标：${w.proposal_spec.non_goals.join("；")}`));
+      section.append(proposal);
+    } else if (w.spec?.approved) {
+      section.append(el("p", "", `已批准规格：${text(w.spec.title, "未命名规格")}。普通的“批准进入开发”仅适用于待确认方案阶段。`));
+    } else {
+      section.append(el("p", "", "当前没有可批准的完整提案。需求分析与规格审批是两个独立步骤。"));
+    }
+    const button = el("button", "command-button primary", "批准进入开发");
+    button.type = "button";
+    button.disabled = !canApprove;
+    button.title = canApprove ? "批准当前提案规格并进入开发计划" : (w.phase !== "SPEC_READY" ? "仅在待确认方案阶段可批准规格" : "提案缺少标题、说明或有效验收标准");
+    button.addEventListener("click", () => sendCommand(w, "accept"));
+    section.append(button);
+    return section;
+  }
+
   function renderWorkflowDetail(w, tab = "overview") {
     const container = $("#workflow-detail");
     if (!w) {
@@ -960,18 +1051,40 @@
     if (w.pr) meta.append(statusBadge("blue", `PR #${w.pr}`));
     intro.append(meta);
     const actions = el("div", "command-actions");
-    const phaseCanAccept = ["INTAKE", "SPEC_READY"].includes(w.phase) && !["CANCELLING", "CANCELLED"].includes(w.control);
+    const phaseCanAnalyze = canAnalyze(w);
+    const phaseCanAccept = canAcceptProposal(w);
+    const forceKind = forceAcceptanceKind(w);
     const phaseCanRejectOrDefer = ["INTAKE", "TRIAGE", "SPEC_READY"].includes(w.phase);
     const phaseCanPause = w.control === "ACTIVE" && !["MERGED", "BLOCKED"].includes(w.phase);
     const phaseCanResume = w.phase === "BLOCKED" ? !["COMPLETED", "CANCELLED", "CANCELLING"].includes(w.control) : !["ACTIVE", "COMPLETED", "CANCELLED", "CANCELLING"].includes(w.control);
-    for (const command of ["accept", "resume", "pause"]) {
+    const primaryCommands = [];
+    if (!w.pr) {
+      const acceptGate = Boolean(state.config?.runner?.require_accept_for_analysis) && w.phase === "INTAKE";
+      primaryCommands.push({ command: "analyze", label: acceptGate ? "接受并开始需求分析" : commandNames.analyze, enabled: phaseCanAnalyze,
+        reason: phaseCanAnalyze ? "开始需求分析" : "仅待处理、待补充信息或已批准规格且 Issue 内容变更后可重新分析" });
+    }
+    if (!w.pr) primaryCommands.push({ command: "accept", label: commandNames.accept, enabled: phaseCanAccept,
+      reason: phaseCanAccept ? "批准提案并进入开发计划" : (w.phase !== "SPEC_READY" ? "仅在待确认方案阶段可批准规格" : "提案缺少完整有效的验收标准") });
+    if (forceKind) primaryCommands.push({ command: "forceaccept", label: forceKind === "pr_merge_gate" ? "强制允许合并" : "强制进入开发", enabled: true, forceKind });
+    for (const item of primaryCommands) {
+      const command = item.command;
+      const button = el("button", `command-button${command === "forceaccept" ? " danger" : ""}`, item.label);
+      button.title = item.reason || "";
+      button.type = "button";
+      button.dataset.command = command;
+      button.disabled = !item.enabled;
+      button.addEventListener("click", () => sendCommand(w, command));
+      actions.append(button);
+    }
+    for (const command of ["resume", "pause"]) {
       const button = el("button", "command-button", commandNames[command]);
       button.type = "button";
       button.dataset.command = command;
-      button.disabled = command === "accept" ? !phaseCanAccept : command === "resume" ? !phaseCanResume : !phaseCanPause;
-      if (button.disabled) continue;
-      button.addEventListener("click", () => sendCommand(w, command));
-      actions.append(button);
+      button.disabled = command === "resume" ? !phaseCanResume : !phaseCanPause;
+      if (!button.disabled) {
+        button.addEventListener("click", () => sendCommand(w, command));
+        actions.append(button);
+      }
     }
     const more = el("details", "command-menu");
     const summary = el("summary", "", "更多操作");
@@ -1006,6 +1119,7 @@
 
     const grid = el("div", "detail-grid");
     if (tab === "overview") {
+      body.append(proposalApprovalCard(w));
       body.append(renderWorkflowDiagram(w));
       const metrics = el("ul", "detail-list");
       detailPair(metrics, "模型调用", w.model_calls);
@@ -1047,6 +1161,8 @@
     container.append(heading);
     const queueNotice = schedulingNotice(w);
     if (queueNotice) container.append(queueNotice);
+    const approvalNotice = forceApprovalNotice(w);
+    if (approvalNotice) container.append(approvalNotice);
     container.append(tabs, body);
     window.requestAnimationFrame(() => {
       window.scrollTo({ top: scrollY, behavior: "auto" });
@@ -1055,9 +1171,27 @@
   }
 
   async function sendCommand(workflow, command) {
+    let apiCommand = command;
+    const payload = { command };
     if (["cancel", "reject", "takeover"].includes(command) && !window.confirm(`确定对该工作流执行“${commandNames[command]}”吗？`)) return;
+    if (command === "forceaccept") {
+      const kind = forceAcceptanceKind(workflow);
+      if (!kind) {
+        showToast("工作流阶段已变化，请刷新后重新确认。", true);
+        return;
+      }
+      const target = `${text(workflow.repository)} ${workflow.pr ? `PR #${workflow.pr}` : `Issue #${workflow.issue}`}`;
+      const message = kind === "pr_merge_gate"
+        ? `将对 ${target} 记录一次人工强制放行，跳过本系统的自动审查门禁。GitHub 其他必需检查仍适用；这不会自动合并，仍需维护者在 GitHub 实际合并。确认继续？`
+        : `将对 ${target} 强制进入开发，绕过需求 / 规格自动审批。此操作会记录操作者和被跳过的检查。确认继续？`;
+      if (!window.confirm(message)) return;
+      apiCommand = kind === "pr_merge_gate" ? "forceaccept merge" : "forceaccept dev";
+      payload.command = apiCommand;
+      payload.expected_generation = workflow.generation;
+      payload.expected_head_sha = workflow.head_sha || "";
+    }
     try {
-      await api(`/api/workflows/${encodeURIComponent(workflow.id)}/commands`, { method: "POST", body: JSON.stringify({ command }) });
+      await api(`/api/workflows/${encodeURIComponent(workflow.id)}/commands`, { method: "POST", body: JSON.stringify(payload) });
       showToast(`已提交：${commandNames[command]}`);
       await refreshState();
       if (command === "status") await loadAudit(workflow.id);
@@ -1128,6 +1262,7 @@
     }
     if (form.elements.stream) form.elements.stream.checked = Boolean(model.stream);
     if (form.elements.mode && runner.mode) form.elements.mode.value = runner.mode;
+    if (form.elements.require_accept_for_analysis) form.elements.require_accept_for_analysis.checked = Boolean(runner.require_accept_for_analysis);
     for (const name of ["workflow_concurrency", "builders", "reviewers", "attempt_minutes"]) {
       if (form.elements[name] && runner[name] !== undefined) form.elements[name].value = runner[name];
     }
@@ -1199,6 +1334,7 @@
         runner: {
           mode: form.elements.mode.value,
           workflow_concurrency: workflowConcurrency,
+          require_accept_for_analysis: form.elements.require_accept_for_analysis.checked,
           builders: formNumber(form, "builders"),
           reviewers: formNumber(form, "reviewers"),
           attempt_minutes: formNumber(form, "attempt_minutes")

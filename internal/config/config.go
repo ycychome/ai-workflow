@@ -30,12 +30,13 @@ type Config struct {
 		MaxOutputTokens int    `yaml:"max_output_tokens"`
 	} `yaml:"model"`
 	Runner struct {
-		Mode                string `yaml:"mode"`
-		Image               string `yaml:"image"`
-		Builders            int    `yaml:"builders"`
-		Reviewers           int    `yaml:"reviewers"`
-		WorkflowConcurrency int    `yaml:"workflow_concurrency"`
-		AttemptMinutes      int    `yaml:"attempt_minutes"`
+		Mode                     string `yaml:"mode"`
+		Image                    string `yaml:"image"`
+		Builders                 int    `yaml:"builders"`
+		Reviewers                int    `yaml:"reviewers"`
+		WorkflowConcurrency      int    `yaml:"workflow_concurrency"`
+		RequireAcceptForAnalysis bool   `yaml:"require_accept_for_analysis"`
+		AttemptMinutes           int    `yaml:"attempt_minutes"`
 	} `yaml:"runner"`
 	Budget struct {
 		IssueCalls   int     `yaml:"issue_calls"`

@@ -24,10 +24,11 @@ type commentAction struct {
 	Body string `json:"body"`
 }
 type gateActionData struct {
-	Pass   bool   `json:"pass"`
-	Reason string `json:"reason"`
-	Key    string `json:"key,omitempty"`
-	SHA    string `json:"sha,omitempty"`
+	Pass           bool   `json:"pass"`
+	Reason         string `json:"reason"`
+	Key            string `json:"key,omitempty"`
+	SHA            string `json:"sha,omitempty"`
+	ManualOverride bool   `json:"manual_override,omitempty"`
 }
 type publishActionData struct {
 	Changes        []gh.FileChange `json:"changes"`
@@ -37,6 +38,17 @@ type publishActionData struct {
 	BaseBranch     string          `json:"base_branch"`
 	BaseSHA        string          `json:"base_sha"`
 	Branch         string          `json:"branch"`
+}
+
+type expectedGenerationContextKey struct{}
+type expectedHeadContextKey struct{}
+
+func WithExpectedGeneration(ctx context.Context, generation int64) context.Context {
+	return context.WithValue(ctx, expectedGenerationContextKey{}, generation)
+}
+
+func WithExpectedHead(ctx context.Context, head string) context.Context {
+	return context.WithValue(ctx, expectedHeadContextKey{}, head)
 }
 
 // statusAction coalesces status updates into one bot-owned issue comment.
@@ -50,14 +62,22 @@ func statusBody(w domain.Workflow) string {
 	fmt.Fprintf(&b, "**AI workflow status:** `%s` · control `%s` · generation `%d`", w.Phase, w.Control, w.Generation)
 	if w.Phase == "NEEDS_INFO" && w.Control == "ACTIVE" {
 		b.WriteString("\n\n**下一步：** 维护者直接在本 Issue 回复补充信息即可，无需 @ bot。收到回复后会重新分析；回复不会自动批准开发规格。")
+	} else if w.Phase == "INTAKE" {
+		b.WriteString("\n\n**下一步：** 检查 Issue 请求并评论 `/ai analyze`（或在控制台开始分析）。这只会生成待审规格；必须随后 `/ai accept` 才会批准规格并进入开发。")
 	} else if w.Phase == "SPEC_READY" {
-		b.WriteString("\n\n**下一步：** 检查下方提议的规格和验收条件，确认后评论 `/ai accept`（或在控制台接受）开始开发。")
+		b.WriteString("\n\n**下一步：** 检查下方提议的规格和验收条件，`/ai accept`（或控制台接受）会明确批准此规格并开始开发。分析不会自动批准。")
 	}
 	if w.LastError != "" {
 		fmt.Fprintf(&b, "\n\n%s", w.LastError)
 	}
 	if w.PR > 0 {
 		fmt.Fprintf(&b, "\n\nPull request: [#%d](https://github.com/%s/pull/%d)", w.PR, w.Repository, w.PR)
+	}
+	if w.ForceApproval != nil {
+		fmt.Fprintf(&b, "\n\n**Manual override:** `%s` by %s at %s (generation %d).", w.ForceApproval.Kind, w.ForceApproval.Actor, w.ForceApproval.ApprovedAt.UTC().Format(time.RFC3339), w.ForceApproval.Generation)
+		if len(w.ForceApproval.Bypassed) > 0 {
+			fmt.Fprintf(&b, " Bypassed: %s.", strings.Join(w.ForceApproval.Bypassed, "; "))
+		}
 	}
 	if w.Spec.Title != "" && w.Spec.Approved {
 		fmt.Fprintf(&b, "\n\n**Accepted specification:** %s\n\n%s", w.Spec.Title, w.Spec.Description)
@@ -207,6 +227,16 @@ func (e *Engine) handleInbox(ctx context.Context, x store.Inbox) error {
 	if cfg.GitHub.InstallationID > 0 && cfg.GitHub.InstallationID != event.Installation.ID {
 		return nil
 	}
+	if event.Issue != nil && event.Issue.PullRequest != nil && x.Event == "issue_comment" && event.Action == "created" && event.Comment != nil {
+		w, err := e.workflowForPR(ctx, repo.ID, event.Issue.Number)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return e.issueComment(ctx, w, event.Comment.ID, event.Comment.User.Login, event.Comment.User.Type, event.Comment.Body)
+	}
 	if event.Issue != nil && event.Issue.PullRequest == nil {
 		if x.Event == "issues" && event.Action == "opened" {
 			return e.createIntake(ctx, repo, event.Installation.ID, *event.Issue, "webhook")
@@ -257,13 +287,7 @@ func (e *Engine) createIntake(ctx context.Context, repo config.Repository, insta
 	if repo.ID <= 0 || installationID <= 0 || issue.Number <= 0 || issue.PullRequest != nil || issue.State == "closed" {
 		return nil
 	}
-	w := domain.Workflow{
-		ID: domain.ID(repo.ID, issue.Number), RepositoryID: repo.ID, Repository: repo.Name,
-		InstallationID: installationID, Issue: issue.Number, IssueTitle: issue.Title,
-		IssueBody: issue.Body, Phase: "INTAKE", Control: "ACTIVE", BaseBranch: repo.BaseBranch,
-		Branch: fmt.Sprintf("codex/issue-%d", issue.Number),
-	}
-	w.Spec.SourceHash = normalizedIssueHash(issue.Body)
+	w := issueIntake(repo, installationID, issue, e.Config().Runner.RequireAcceptForAnalysis)
 	created, err := e.Store.CreateIfAbsent(ctx, w)
 	if err != nil || !created {
 		return err
@@ -306,9 +330,12 @@ func (e *Engine) issueEdited(ctx context.Context, w domain.Workflow, issue *gh.I
 		x.IssueBody = issue.Body
 		x.ProposalSpec = nil
 		x.Generation++
+		if x.PR > 0 {
+			x.Review.Verdict = "OBSOLETE"
+		}
 		x.Control = "PAUSING"
 		x.Discussion = append(x.Discussion, "Issue edit proposal requires maintainer acceptance before the approved specification can change.")
-		x.LastError = "Issue changed; review the proposed edit and use /ai accept to start a new triage."
+		x.LastError = "Issue changed; after controls settle, use /ai analyze to review the edit. The accepted specification remains unchanged until a proposal is explicitly accepted."
 		return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 	})
 }
@@ -420,6 +447,12 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 	if err != nil {
 		return err
 	}
+	if expected, ok := ctx.Value(expectedGenerationContextKey{}).(int64); ok && w.Generation != expected {
+		return errors.New("workflow generation changed; review the current state and confirm again")
+	}
+	if expected, ok := ctx.Value(expectedHeadContextKey{}).(string); ok && w.HeadSHA != expected {
+		return errors.New("pull request head changed; review the current state and confirm again")
+	}
 	if !e.authorized(ctx, w, actor, len(dashboard) > 0 && dashboard[0]) {
 		return errors.New("actor is not an authorized repository maintainer")
 	}
@@ -429,7 +462,24 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 	}
 	switch cmd {
 	case "accept":
+		if w.Phase == "INTAKE" {
+			return e.analyze(ctx, w, actor)
+		}
 		return e.accept(ctx, w, actor)
+	case "analyze":
+		return e.analyze(ctx, w, actor)
+	case "forceaccept":
+		return e.forceAccept(ctx, w, actor)
+	case "forceaccept dev":
+		if !forceIssueStage(w) {
+			return fmt.Errorf("forceaccept dev is unavailable in phase %s with control %s", w.Phase, w.Control)
+		}
+		return e.forceAcceptIssue(ctx, w, actor)
+	case "forceaccept merge":
+		if w.PR <= 0 {
+			return errors.New("forceaccept merge requires an existing pull request")
+		}
+		return e.forceAcceptPR(ctx, w, actor)
 	case "status":
 		return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 			return []store.Action{store.NewAction(*x, "comment", map[string]any{"body": statusBody(*x), "marker": "status"})}, nil
@@ -484,19 +534,10 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 			return errors.New("reconciliation found an external change; review the proposal and accept it before resuming")
 		}
 		if refreshed.ProposalSpec != nil {
-			return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-				x.Generation++
-				x.Control = "ACTIVE"
-				if x.Phase == "SPEC_READY" || x.Phase == "DEFERRED" {
-					x.Phase = "SPEC_READY"
-				} else {
-					x.Phase = "TRIAGE"
-				}
-				return []store.Action{statusAction(*x)}, nil
-			})
+			return errors.New("a proposed specification requires explicit `/ai accept`; use `/ai analyze` only to request a new analysis")
 		}
 		if refreshed.ProposalSpec == nil && normalizedIssueHash(refreshed.IssueBody) != refreshed.Spec.SourceHash {
-			return errors.New("the edited issue requires /ai accept before it can be resumed")
+			return errors.New("the edited issue requires `/ai analyze` before it can be resumed")
 		}
 		currentKey := e.key(ctx, refreshed)
 		if skepticCheckpointReady(refreshed, currentKey) {
@@ -513,7 +554,7 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 			} else if x.Spec.Approved {
 				x.Phase = "PLANNING"
 			} else {
-				x.Phase = "TRIAGE"
+				return nil, errors.New("workflow has no approved specification; use `/ai analyze` to request triage")
 			}
 			return []store.Action{statusAction(*x)}, nil
 		})
@@ -579,37 +620,18 @@ func (e *Engine) authorized(ctx context.Context, w domain.Workflow, actor string
 
 func (e *Engine) accept(ctx context.Context, w domain.Workflow, actor string) error {
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-		if x.Control == "CANCELLING" || x.Control == "CANCELLED" {
-			return nil, errors.New("cancelled workflow cannot be accepted")
-		}
-		if x.ProposalSpec == nil && normalizedIssueHash(x.IssueBody) != x.Spec.SourceHash {
-			x.Generation++
-			x.Control = "ACTIVE"
-			x.Phase = "TRIAGE"
-			x.ProposalSpec = nil
-			x.LastError = "issue edit accepted for triage; the current approved specification remains active until a proposal is accepted"
-			return []store.Action{statusAction(*x)}, nil
-		}
-		if x.Phase == "INTAKE" {
-			x.Control = "ACTIVE"
-			x.Phase = "TRIAGE"
-			x.AuthorizedBy = actor
-			x.LastError = ""
-			return []store.Action{statusAction(*x)}, nil
+		if x.Control != "ACTIVE" && x.Control != "PAUSED" {
+			return nil, errors.New("workflow control state does not allow accepting a specification")
 		}
 		if x.Phase != "SPEC_READY" {
 			return nil, fmt.Errorf("accept is available when a specification is ready; current phase is %s", x.Phase)
 		}
-		if x.ProposalSpec == nil {
-			return nil, errors.New("there is no proposed specification to accept")
+		if err := validateProposalSpec(x, x.ProposalSpec); err != nil {
+			return nil, err
 		}
 		proposal := *x.ProposalSpec
-		if proposal.Title == "" || proposal.Description == "" || len(proposal.Criteria) == 0 {
-			return nil, errors.New("cannot accept an incomplete specification")
-		}
 		proposal.Approved = true
 		proposal.ApprovedBy = actor
-		proposal.SourceHash = normalizedIssueHash(x.IssueBody)
 		proposal.Digest = domain.SpecDigest(proposal)
 		x.Spec = proposal
 		x.ProposalSpec = nil
@@ -620,6 +642,303 @@ func (e *Engine) accept(ctx context.Context, w domain.Workflow, actor string) er
 		x.LastError = ""
 		return []store.Action{statusAction(*x)}, nil
 	})
+}
+
+func validateProposalSpec(w *domain.Workflow, proposal *domain.Spec) error {
+	if proposal == nil {
+		return errors.New("there is no proposed specification to accept")
+	}
+	if proposal.Title == "" || proposal.Description == "" || len(proposal.Criteria) == 0 {
+		return errors.New("cannot accept an incomplete specification")
+	}
+	if proposal.SourceHash != normalizedIssueHash(w.IssueBody) {
+		return errors.New("the proposal does not match the current Issue; use `/ai analyze` to refresh it")
+	}
+	seen := map[string]bool{}
+	for _, c := range proposal.Criteria {
+		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Description) == "" || seen[c.ID] {
+			return errors.New("proposed acceptance criteria are invalid")
+		}
+		seen[c.ID] = true
+	}
+	if proposal.Digest == "" || proposal.Digest != domain.SpecDigest(*proposal) {
+		return errors.New("proposed specification digest is invalid")
+	}
+	return nil
+}
+
+func analyzeAllowed(w domain.Workflow) bool {
+	if w.Control == "CANCELLING" || w.Control == "CANCELLED" || w.Control == "HUMAN_OWNED" || w.Control == "COMPLETED" || w.Control == "PAUSING" {
+		return false
+	}
+	switch w.Phase {
+	case "INTAKE", "NEEDS_INFO":
+		return w.Control == "ACTIVE" || w.Control == "PAUSED"
+	case "TRIAGE", "SPEC_READY", "DEFERRED", "REJECT_PROPOSED", "REJECTED", "BLOCKED":
+		return w.Control != "ACTIVE" && (!w.Spec.Approved || normalizedIssueHash(w.IssueBody) != w.Spec.SourceHash)
+	default:
+		return w.Spec.Approved && normalizedIssueHash(w.IssueBody) != w.Spec.SourceHash && w.Control == "PAUSED"
+	}
+}
+
+func (e *Engine) analyze(ctx context.Context, w domain.Workflow, actor string) error {
+	if !analyzeAllowed(w) {
+		return fmt.Errorf("analyze is not available in phase %s with control %s", w.Phase, w.Control)
+	}
+	if w.Control == "PAUSED" {
+		if pending, err := e.Store.PendingWrites(ctx, w.ID); err != nil {
+			return err
+		} else if pending > 0 {
+			return errors.New("workflow has an unresolved external write; reconcile it before analyzing")
+		}
+	}
+	e.stop(w.ID)
+	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if !analyzeAllowed(*x) || x.Generation != w.Generation || x.Version != w.Version {
+			return nil, errors.New("workflow changed before analysis could start")
+		}
+		x.Generation++
+		x.Control = "ACTIVE"
+		x.Phase = "TRIAGE"
+		x.ProposalSpec = nil
+		x.AuthorizedBy = actor
+		x.LastError = "analysis requested by maintainer; the accepted specification remains unchanged until a proposal is explicitly accepted"
+		return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
+	})
+}
+
+func forceIssueStage(w domain.Workflow) bool {
+	if w.Control != "ACTIVE" && w.Control != "PAUSED" {
+		return false
+	}
+	switch w.Phase {
+	case "INTAKE", "TRIAGE", "NEEDS_INFO", "SPEC_READY", "DEFERRED", "REJECT_PROPOSED", "REJECTED":
+		return true
+	case "BLOCKED":
+		return w.PR == 0
+	default:
+		return false
+	}
+}
+
+func manualForceIdentity(w domain.Workflow, approval *domain.ForceApproval, key, policyDigest string) bool {
+	return approval != nil && approval.Kind == "pr_merge_gate" && approval.Generation == w.Generation &&
+		approval.SpecDigest == w.Spec.Digest && approval.PolicyDigest == policyDigest &&
+		approval.VerificationKey == key && w.Review.Key == key && approval.BaseSHA == w.BaseSHA && approval.HeadSHA == w.HeadSHA &&
+		w.PR > 0 && w.Control == "ACTIVE" && w.Phase == "AWAITING_MAINTAINER"
+}
+
+// ForceApprovalCurrent reports whether a recorded manual PR override still
+// applies to the workflow's exact candidate identity.
+func (e *Engine) ForceApprovalCurrent(ctx context.Context, w domain.Workflow) bool {
+	if w.ForceApproval == nil || w.ForceApproval.Kind != "pr_merge_gate" {
+		return false
+	}
+	return manualForceIdentity(w, w.ForceApproval, e.key(ctx, w), domain.Digest(e.repository(w)))
+}
+
+func (e *Engine) IssueMatchesApprovedSpec(w domain.Workflow) bool {
+	return w.Spec.Approved && normalizedIssueHash(w.IssueBody) == w.Spec.SourceHash
+}
+
+func (e *Engine) forceAccept(ctx context.Context, w domain.Workflow, actor string) error {
+	if forceIssueStage(w) {
+		return e.forceAcceptIssue(ctx, w, actor)
+	}
+	if w.PR <= 0 {
+		return fmt.Errorf("forceaccept is unavailable in phase %s", w.Phase)
+	}
+	return e.forceAcceptPR(ctx, w, actor)
+}
+
+func (e *Engine) forceAcceptIssue(ctx context.Context, w domain.Workflow, actor string) error {
+	if !forceIssueStage(w) {
+		return errors.New("forceaccept cannot start development from this workflow state")
+	}
+	if pending, err := e.Store.PendingWrites(ctx, w.ID); err != nil {
+		return err
+	} else if pending > 0 {
+		return errors.New("workflow has unresolved external writes; reconcile them before forceaccept")
+	}
+	if w.Repository != "local/pilot" {
+		c, owner, repo, err := e.client(ctx, w)
+		if err != nil {
+			return err
+		}
+		issue, err := c.GetIssue(ctx, owner, repo, w.Issue)
+		if err != nil {
+			return err
+		}
+		if issue.State != "open" {
+			return errors.New("forceaccept requires an open source Issue")
+		}
+		if issue.Title != w.IssueTitle || normalizedIssueHash(issue.Body) != normalizedIssueHash(w.IssueBody) {
+			return errors.New("the Issue changed since this view was loaded; reconcile it and review the updated request before forceaccept")
+		}
+	}
+	proposal := domain.Spec{}
+	if err := validateProposalSpec(&w, w.ProposalSpec); err == nil {
+		proposal = *w.ProposalSpec
+	} else if w.Spec.Approved && normalizedIssueHash(w.IssueBody) == w.Spec.SourceHash {
+		proposal = w.Spec
+	} else {
+		criteria := append([]domain.Criterion(nil), w.Spec.Criteria...)
+		criteria = append(criteria, domain.Criterion{ID: "AC-FORCE-REQUEST", Description: "Implement and verify the complete request in this Issue's current title and body while preserving all prior accepted constraints; use reasonable, documented defaults for unresolved questions rather than treating each question as a hard requirement."})
+		proposal = domain.Spec{
+			Revision: w.Spec.Revision + 1, Title: w.IssueTitle,
+			Description: manualIssueSpecDescription(w),
+			Criteria:    criteria,
+			NonGoals:    append([]string(nil), w.Spec.NonGoals...),
+			Risk:        "Manual force acceptance; analysis and specification review were bypassed.",
+			SourceHash:  normalizedIssueHash(w.IssueBody),
+		}
+	}
+	proposal.Approved = true
+	proposal.ApprovedBy = actor
+	proposal.Digest = domain.SpecDigest(proposal)
+	now := time.Now().UTC()
+	bypassed := []string{"model triage", "specification review"}
+	e.mu.RLock()
+	cancelWorker := e.active[w.ID]
+	e.mu.RUnlock()
+	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if !forceIssueStage(*x) || x.Generation != w.Generation || x.Version != w.Version || normalizedIssueHash(x.IssueBody) != proposal.SourceHash {
+			return nil, errors.New("workflow changed before forceaccept could start development")
+		}
+		x.Generation++
+		proposal.Revision = x.Spec.Revision + 1
+		proposal.Digest = domain.SpecDigest(proposal)
+		x.Spec = proposal
+		x.ProposalSpec = nil
+		x.Tasks = nil
+		x.Review = domain.Review{}
+		x.Control = "ACTIVE"
+		x.Phase = "PLANNING"
+		x.AuthorizedBy = actor
+		x.LastError = "Development started by explicit /ai forceaccept; model triage and specification review were bypassed."
+		key := e.key(ctx, *x)
+		policy := e.repository(*x)
+		x.ForceApproval = &domain.ForceApproval{Kind: "issue_development", Actor: actor, Command: "forceaccept", ApprovedAt: now, Generation: x.Generation, SpecDigest: x.Spec.Digest, PolicyDigest: domain.Digest(policy), VerificationKey: key, IssueHash: normalizedIssueHash(x.IssueBody), Bypassed: bypassed, PriorConstraints: append([]domain.Criterion(nil), w.Spec.Criteria...), Discussion: append([]string(nil), w.Discussion...)}
+		return []store.Action{gateAction(*x, false, "manual forceaccept restarted development; previous PR gate approval is revoked"), statusAction(*x)}, nil
+	})
+	if err == nil && cancelWorker != nil {
+		cancelWorker()
+	}
+	return err
+}
+
+func (e *Engine) forceAcceptPR(ctx context.Context, w domain.Workflow, actor string) error {
+	if w.Control != "ACTIVE" && w.Control != "PAUSED" {
+		return errors.New("forceaccept cannot override cancellation, takeover, or completed control")
+	}
+	switch w.Phase {
+	case "VERIFYING", "REVIEWING", "CHANGES_REQUESTED", "BLOCKED", "AWAITING_MAINTAINER":
+	default:
+		return fmt.Errorf("PR forceaccept is unavailable in phase %s", w.Phase)
+	}
+	if w.Repository != "local/pilot" {
+		if err := e.reconcileOne(store.WithoutCommand(ctx), w); err != nil && !errors.Is(err, store.ErrNoChange) {
+			return fmt.Errorf("cannot reconcile current PR before forceaccept: %w", err)
+		}
+		refreshed, err := e.Store.Get(ctx, w.ID)
+		if err != nil {
+			return err
+		}
+		w = refreshed
+		if w.Control != "ACTIVE" && w.Control != "PAUSED" {
+			return errors.New("workflow control changed during PR reconciliation")
+		}
+		switch w.Phase {
+		case "VERIFYING", "REVIEWING", "CHANGES_REQUESTED", "BLOCKED", "AWAITING_MAINTAINER":
+		default:
+			return fmt.Errorf("PR forceaccept is unavailable after reconciliation in phase %s", w.Phase)
+		}
+		c, owner, repo, err := e.client(ctx, w)
+		if err != nil {
+			return err
+		}
+		pr, err := c.GetPullRequest(ctx, owner, repo, w.PR)
+		if err != nil {
+			return err
+		}
+		if pr.Merged || pr.State != "open" {
+			return errors.New("forceaccept requires an open, unmerged pull request")
+		}
+		if pr.Head.SHA == "" || pr.Base.SHA == "" || pr.Head.SHA != w.HeadSHA || pr.Base.SHA != w.BaseSHA {
+			return errors.New("PR identity changed during reconciliation; verify the current candidate before forceaccept")
+		}
+	}
+	if pending, err := e.Store.PendingWrites(ctx, w.ID); err != nil {
+		return err
+	} else if pending > 0 {
+		return errors.New("workflow has unresolved external writes; reconcile them before forceaccept")
+	}
+	e.mu.RLock()
+	cancelWorker := e.active[w.ID]
+	e.mu.RUnlock()
+	next := w
+	next.Generation++
+	next.Control = "ACTIVE"
+	next.Phase = "AWAITING_MAINTAINER"
+	policy := e.repository(w)
+	key := e.key(ctx, next)
+	now := time.Now().UTC()
+	bypassed := []string{"automated verification", "reviewer analysis", "skeptic review", "automatic merge-gate criteria"}
+	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if x.Version != w.Version || x.Generation != w.Generation || x.PR != w.PR || x.HeadSHA != w.HeadSHA || x.BaseSHA != w.BaseSHA || x.Control == "HUMAN_OWNED" || x.Control == "CANCELLING" || x.Control == "CANCELLED" || x.Control == "COMPLETED" {
+			return nil, errors.New("PR identity or control changed before forceaccept")
+		}
+		x.Generation++
+		x.Control = "ACTIVE"
+		x.Phase = "AWAITING_MAINTAINER"
+		x.Review.Key = key
+		x.Review.Verdict = "FORCED"
+		x.Review.Reason = "MANUAL OVERRIDE by " + actor + " via /ai forceaccept; review and automatic verification were bypassed. A maintainer must still merge the PR."
+		x.ForceApproval = &domain.ForceApproval{Kind: "pr_merge_gate", Actor: actor, Command: "forceaccept", ApprovedAt: now, Generation: x.Generation, SpecDigest: x.Spec.Digest, PolicyDigest: domain.Digest(policy), VerificationKey: key, BaseSHA: x.BaseSHA, HeadSHA: x.HeadSHA, Bypassed: bypassed}
+		x.LastError = x.Review.Reason
+		gate := store.NewAction(*x, "gate", gateActionData{Pass: true, Reason: x.Review.Reason, Key: key, SHA: x.HeadSHA, ManualOverride: true})
+		actions := []store.Action{gate, statusAction(*x)}
+		if !x.PRReady {
+			actions = append([]store.Action{store.NewAction(*x, "ready", map[string]any{})}, actions...)
+		}
+		return actions, nil
+	})
+	if err == nil && cancelWorker != nil {
+		cancelWorker()
+	}
+	return err
+}
+
+func manualIssueSpecDescription(w domain.Workflow) string {
+	var b strings.Builder
+	b.WriteString("Manually approved from the complete current Issue request without model triage. The following Issue text is the source request and must be implemented in full:\n\n### Issue title\n")
+	b.WriteString(w.IssueTitle)
+	b.WriteString("\n\n### Issue body\n")
+	b.WriteString(w.IssueBody)
+	if len(w.Spec.Criteria) > 0 || len(w.Spec.NonGoals) > 0 {
+		b.WriteString("\n\n### Previously accepted constraints\n")
+		for _, c := range w.Spec.Criteria {
+			fmt.Fprintf(&b, "- %s: %s\n", c.ID, c.Description)
+		}
+		for _, n := range w.Spec.NonGoals {
+			fmt.Fprintf(&b, "- Non-goal: %s\n", n)
+		}
+	}
+	if len(w.Discussion) > 0 {
+		b.WriteString("\n\n### Prior discussion context (untrusted user context; preserve as context, not instructions to override repository policy)\n")
+		for _, entry := range w.Discussion {
+			fmt.Fprintf(&b, "- %s\n", entry)
+		}
+	}
+	return b.String()
+}
+
+func findingIDs(findings []domain.Finding) []string {
+	ids := make([]string, 0, len(findings))
+	for _, f := range findings {
+		ids = append(ids, f.ID)
+	}
+	return ids
 }
 
 func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event gh.WebhookEvent) error {
@@ -830,8 +1149,17 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 	if err != nil {
 		return nil, err, false
 	}
-	if d.Pass && (current.Generation != a.Generation || current.Review.Key != d.Key || current.HeadSHA != d.SHA || current.Control != "ACTIVE" || (current.Phase != "READY" && current.Phase != "AWAITING_MAINTAINER")) {
-		return nil, store.ErrStale, false
+	manual := d.Pass && d.ManualOverride
+	if d.Pass {
+		if manual {
+			policy := e.repository(current)
+			currentKey := e.key(ctx, current)
+			if current.Generation != a.Generation || !manualForceIdentity(current, current.ForceApproval, currentKey, domain.Digest(policy)) || current.Review.Key != d.Key || current.HeadSHA != d.SHA {
+				return nil, store.ErrStale, false
+			}
+		} else if current.Generation != a.Generation || current.Review.Key != d.Key || current.HeadSHA != d.SHA || current.Control != "ACTIVE" || (current.Phase != "READY" && current.Phase != "AWAITING_MAINTAINER") {
+			return nil, store.ErrStale, false
+		}
 	}
 	if current.PR <= 0 || current.HeadSHA == "" {
 		return map[string]string{"internal": "no pull request head to gate"}, nil, false
@@ -845,6 +1173,9 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 		return nil, err, false
 	}
 	keySummary := d.Reason
+	if manual && current.ForceApproval != nil {
+		keySummary = fmt.Sprintf("MANUAL OVERRIDE: explicitly allowed by %s via /ai forceaccept at %s. This is not an automatic verification pass; a maintainer must still merge the PR.\n\nBypassed: %s", current.ForceApproval.Actor, current.ForceApproval.ApprovedAt.UTC().Format(time.RFC3339), strings.Join(current.ForceApproval.Bypassed, "; "))
+	}
 	if d.Key != "" {
 		keySummary += "\n\nVerification key: " + d.Key
 	}
@@ -898,14 +1229,24 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 			if latestErr != nil {
 				return check, latestErr, false
 			}
-			if latest.Generation == a.Generation && latest.Control == "ACTIVE" && latest.Review.Key == d.Key && latest.HeadSHA == d.SHA {
+			valid := latest.Generation == a.Generation && latest.Control == "ACTIVE" && latest.Review.Key == d.Key && latest.HeadSHA == d.SHA
+			if manual {
+				policy := e.repository(latest)
+				valid = latest.Generation == a.Generation && manualForceIdentity(latest, latest.ForceApproval, e.key(ctx, latest), domain.Digest(policy)) && latest.Review.Key == d.Key && latest.HeadSHA == d.SHA
+			}
+			if valid {
 				if _, bodyErr := c.UpdateOwnedPRBody(ctx, owner, repo, latest.PR, prOwnedSummary(latest)); bodyErr != nil {
 					return check, bodyErr, outcomeUnknown(bodyErr)
 				}
 			}
 		}
 		_ = e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-			if x.Generation != a.Generation || x.Review.Key != d.Key || x.HeadSHA != d.SHA {
+			valid := x.Generation == a.Generation && x.Review.Key == d.Key && x.HeadSHA == d.SHA
+			if manual {
+				policy := e.repository(*x)
+				valid = x.Generation == a.Generation && manualForceIdentity(*x, x.ForceApproval, e.key(ctx, *x), domain.Digest(policy)) && x.Review.Key == d.Key && x.HeadSHA == d.SHA
+			}
+			if !valid {
 				if !d.Pass && x.HeadSHA == targetSHA {
 					x.CheckID = check.ID
 					x.CheckSHA = targetSHA

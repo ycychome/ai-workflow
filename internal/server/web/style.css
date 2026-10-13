@@ -222,6 +222,19 @@ tbody tr.selected { background: #f2f6ff; }
 .subsection-title { display: block; margin: 13px 0 8px; color: #596780; font-size: 10px; font-weight: 700; }
 .proposal-content > h4 { margin: 6px 0; color: #374660; font-size: 12px; }
 .proposal-content > p { color: #758096; font-size: 10px; line-height: 1.6; }
+.approval-card { display: grid; gap: 9px; margin: 0 0 14px; padding: 15px; background: #f8faff; border: 1px solid #dce6fb; border-radius: 10px; }
+.approval-heading { color: #263b63; font-size: 14px; font-weight: 700; }
+.approval-card > p { margin: 0; color: #657188; font-size: 12px; line-height: 1.6; }
+.approval-card .proposal-content { padding: 10px; background: #fff; border: 1px solid #e5eaf1; border-radius: 8px; }
+.approval-card .command-button { justify-self: start; }
+.command-button.primary { color: #fff; background: #315fc5; border-color: #315fc5; }
+.command-button.primary:hover { color: #fff; background: #274fae; }
+.command-button.danger { color: #9d4c26; background: #fff8f2; border-color: #f0d2bd; }
+.force-approval-notice { display: grid; gap: 4px; margin: 12px 0; padding: 12px 14px; border: 1px solid #e9d7b1; border-radius: 9px; background: #fffaf0; color: #725321; }
+.force-approval-notice.current { border-color: #e6c77c; background: #fff8e7; }
+.force-approval-notice.historical { border-color: #e5eaf1; background: #f7f8fa; color: #68758b; }
+.force-approval-notice strong { font-size: 12px; }
+.force-approval-notice p { margin: 0; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .proposal-state { padding: 8px 10px; background: #fff8e9; border: 1px solid #f5e9c9; border-radius: 7px; }
 .inline-report { max-height: 220px; margin: 7px 0 0; padding: 9px; overflow: auto; color: #d8e4fa; background: #172442; border-radius: 7px; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .evidence-dialog { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(18, 31, 53, .56); }

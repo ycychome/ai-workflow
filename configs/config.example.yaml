@@ -21,6 +21,7 @@ runner:
   builders: 2
   reviewers: 2
   workflow_concurrency: 2 # 1-4; human waiting phases do not occupy a slot
+  require_accept_for_analysis: false # true waits for /ai accept before triage
   attempt_minutes: 30
 budget:
   issue_calls: 80
