@@ -148,7 +148,7 @@ func TestApprovalWorkflowPostgresIntegration(t *testing.T) {
 		approvalFixture(882341, 5, "SPEC_READY", "CANCELLED", true),
 		approvalFixture(882341, 6, "SPEC_READY", "ACTIVE", true),
 	}
-	proposals[3].ProposalSpec.SourceHash = normalizedIssueHash(proposals[3].IssueBody + " changed")
+	proposals[3].ProposalSpec.SourceHash = normalizedIssueSourceHash(proposals[3].IssueTitle, proposals[3].IssueBody+" changed")
 	proposals[3].ProposalSpec.Digest = domain.SpecDigest(*proposals[3].ProposalSpec)
 	for _, w := range proposals {
 		if err := s.Create(ctx, w); err != nil {
@@ -233,7 +233,7 @@ func approvalFixture(repoID int64, issue int, phase, control string, proposal bo
 		IssueTitle: "Fixture: repair Add", IssueBody: fmt.Sprintf("Issue fixture %d", issue), Phase: phase, Control: control,
 	}
 	if proposal {
-		p := domain.Spec{Revision: 1, Title: "Approved fixture", Description: "Implement the complete request.", Criteria: []domain.Criterion{{ID: "AC-1", Description: "The request is implemented."}}, SourceHash: normalizedIssueHash(w.IssueBody)}
+		p := domain.Spec{Revision: 1, Title: "Approved fixture", Description: "Implement the complete request.", Criteria: []domain.Criterion{{ID: "AC-1", Description: "The request is implemented."}}, SourceHash: normalizedIssueSourceHash(w.IssueTitle, w.IssueBody)}
 		p.Digest = domain.SpecDigest(p)
 		w.ProposalSpec = &p
 	}

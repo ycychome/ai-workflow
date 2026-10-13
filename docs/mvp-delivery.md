@@ -30,6 +30,8 @@
 
 GitHub Issue 和对应 PR 自动显示 `ai-workflow:` 状态标签：当前阶段一枚，暂停、取消、人工控制或完成时另加控制状态一枚。状态变化通过独立 Outbox 同步，并在启动及每五分钟补齐已有工作流；仅替换此前缀下旧状态，保留其他标签，不占执行容量、不更改合并门禁。
 
+PR #2 的六项审查发现已修复，并增加真实 Docker、模拟 GitHub HTTP 与隔离 PostgreSQL 回归；修复边界及逐项验证见 [审查修复记录](pr-2-review-fixes.md)。
+
 ## 验证记录与范围
 
 - 本机 Fake 闭环和真实 GitHub App Fake 闭环已到 `AWAITING_MAINTAINER/PASS`，完成实际沙箱命令、Git 数据提交、PR、测试合并快照和 Check Run。试点 Fake PR 为 [#2](https://github.com/ycychome/ai-workflow-pilot/pull/2)，随后取消以释放仓库执行名额，取消会撤销门禁。

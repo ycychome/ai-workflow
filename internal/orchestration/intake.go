@@ -15,7 +15,7 @@ func issueIntake(repo config.Repository, installationID int64, issue gh.Issue, r
 		IssueBody: issue.Body, Phase: "INTAKE", Control: "ACTIVE", BaseBranch: repo.BaseBranch,
 		Branch: fmt.Sprintf("codex/issue-%d", issue.Number),
 	}
-	w.Spec.SourceHash = normalizedIssueHash(issue.Body)
+	w.Spec.SourceHash = normalizedIssueSourceHash(issue.Title, issue.Body)
 	if !requireAccept {
 		w.Phase = "TRIAGE"
 		w.AuthorizedBy = "automatic-analysis"

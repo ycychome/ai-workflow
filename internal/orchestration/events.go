@@ -139,6 +139,13 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			pr = *found
 		}
 	}
+	var ownPublish bool
+	if pr.Number > 0 {
+		ownPublish, err = e.inFlightPublishMatches(ctx, w, pr)
+		if err != nil {
+			return fmt.Errorf("verify in-flight publish identity: %w", err)
+		}
+	}
 	var gate *gh.CheckRun
 	if pr.Number > 0 && pr.Head.SHA != "" {
 		checks, checkErr := c.ListCheckRuns(ctx, owner, repo, pr.Head.SHA)
@@ -153,12 +160,15 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 		}
 	}
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-		if normalizedIssueHash(issue.Body) != normalizedIssueHash(x.IssueBody) {
+		if normalizedIssueSourceHash(issue.Title, issue.Body) != normalizedIssueSourceHash(x.IssueTitle, x.IssueBody) {
 			x.IssueTitle = issue.Title
 			x.IssueBody = issue.Body
 			x.ProposalSpec = nil
 			x.Generation++
-			x.Control = "PAUSING"
+			x.Review.Verdict = "OBSOLETE"
+			if x.Control == "ACTIVE" {
+				x.Control = "PAUSING"
+			}
 			x.LastError = "Issue changed; after controls settle, use /ai analyze to request a proposal. The accepted specification remains unchanged until /ai accept."
 			x.Discussion = append(x.Discussion, "Issue edit proposal detected during reconciliation.")
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
@@ -168,6 +178,11 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.Control = "PAUSING"
 			x.LastError = "source issue was closed; maintainer must confirm whether work should continue"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
+		}
+		if ownPublish && x.Generation == w.Generation && x.Control == "ACTIVE" {
+			// The publisher owns this exact commit and will record the PR/head/task
+			// receipt. Do not advance generation before that receipt is committed.
+			return nil, store.ErrNoChange
 		}
 		if x.PR == 0 {
 			if pr.Number == 0 {
@@ -198,10 +213,12 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			return []store.Action{statusAction(*x)}, nil
 		}
 		if pr.State == "closed" {
-			if x.Phase != "BLOCKED" || x.Control != "PAUSED" {
+			if x.Phase != "BLOCKED" || x.LastError != "pull request is closed without a confirmed merge" {
 				x.Generation++
 				x.Phase = "BLOCKED"
-				x.Control = "PAUSED"
+				if x.Control == "ACTIVE" || x.Control == "PAUSING" {
+					x.Control = "PAUSED"
+				}
 				x.LastError = "pull request is closed without a confirmed merge"
 				return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 			}
@@ -215,15 +232,14 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
 		if pr.Head.SHA != "" && x.HeadSHA != "" && pr.Head.SHA != x.HeadSHA {
-			// A commit from the current outbox may have landed before its receipt was
-			// recorded. If there is an unfinished publish action, let it reconcile.
-			pending, nErr := e.Store.PendingWrites(ctx, x.ID)
-			if nErr == nil && pending > 0 {
+			if ownPublish {
 				return nil, store.ErrNoChange
 			}
 			x.Generation++
 			x.HeadSHA = pr.Head.SHA
-			x.Control = "PAUSING"
+			if x.Control == "ACTIVE" {
+				x.Control = "PAUSING"
+			}
 			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "pull request head changed outside the current workflow generation"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
@@ -232,7 +248,9 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.Generation++
 			x.BaseBranch = pr.Base.Ref
 			x.BaseSHA = pr.Base.SHA
-			x.Control = "PAUSING"
+			if x.Control == "ACTIVE" {
+				x.Control = "PAUSING"
+			}
 			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "PR target branch changed; resume to verify the current target"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil

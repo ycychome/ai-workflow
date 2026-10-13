@@ -307,6 +307,18 @@ func (e *Engine) createIntake(ctx context.Context, repo config.Repository, insta
 
 func normalizedIssueHash(s string) string { return domain.Digest(strings.Join(strings.Fields(s), " ")) }
 
+// v2 binds the complete requirement input, rather than its body alone.
+func normalizedIssueSourceHash(title, body string) string {
+	return "issue-v2:" + domain.Digest([]string{strings.Join(strings.Fields(title), " "), strings.Join(strings.Fields(body), " ")})
+}
+func sourceMatchesIssue(w domain.Workflow, hash string) bool {
+	if hash == normalizedIssueSourceHash(w.IssueTitle, w.IssueBody) {
+		return true
+	}
+	// Legacy source digests remain valid only for the persisted original title.
+	return w.LegacyIssueTitle != nil && strings.Join(strings.Fields(w.IssueTitle), " ") == strings.Join(strings.Fields(*w.LegacyIssueTitle), " ") && hash == normalizedIssueHash(w.IssueBody)
+}
+
 func (e *Engine) workflowForPR(ctx context.Context, repositoryID int64, number int) (domain.Workflow, error) {
 	workflows, err := e.Store.List(ctx)
 	if err != nil {
@@ -321,12 +333,12 @@ func (e *Engine) workflowForPR(ctx context.Context, repositoryID int64, number i
 }
 
 func (e *Engine) issueEdited(ctx context.Context, w domain.Workflow, issue *gh.Issue) error {
-	if normalizedIssueHash(w.IssueBody) == normalizedIssueHash(issue.Body) {
+	if normalizedIssueSourceHash(w.IssueTitle, w.IssueBody) == normalizedIssueSourceHash(issue.Title, issue.Body) {
 		return nil
 	}
 	e.stop(w.ID)
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-		if normalizedIssueHash(x.IssueBody) == normalizedIssueHash(issue.Body) {
+		if normalizedIssueSourceHash(x.IssueTitle, x.IssueBody) == normalizedIssueSourceHash(issue.Title, issue.Body) {
 			return nil, store.ErrNoChange
 		}
 		x.IssueTitle = issue.Title
@@ -336,7 +348,9 @@ func (e *Engine) issueEdited(ctx context.Context, w domain.Workflow, issue *gh.I
 		if x.PR > 0 {
 			x.Review.Verdict = "OBSOLETE"
 		}
-		x.Control = "PAUSING"
+		if x.Control == "ACTIVE" {
+			x.Control = "PAUSING"
+		}
 		x.Discussion = append(x.Discussion, "Issue edit proposal requires maintainer acceptance before the approved specification can change.")
 		x.LastError = "Issue changed; after controls settle, use /ai analyze to review the edit. The accepted specification remains unchanged until a proposal is explicitly accepted."
 		return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
@@ -539,7 +553,7 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 		if refreshed.ProposalSpec != nil {
 			return errors.New("a proposed specification requires explicit `/ai accept`; use `/ai analyze` only to request a new analysis")
 		}
-		if refreshed.ProposalSpec == nil && normalizedIssueHash(refreshed.IssueBody) != refreshed.Spec.SourceHash {
+		if refreshed.ProposalSpec == nil && !sourceMatchesIssue(refreshed, refreshed.Spec.SourceHash) {
 			return errors.New("the edited issue requires `/ai analyze` before it can be resumed")
 		}
 		currentKey := e.key(ctx, refreshed)
@@ -654,7 +668,7 @@ func validateProposalSpec(w *domain.Workflow, proposal *domain.Spec) error {
 	if proposal.Title == "" || proposal.Description == "" || len(proposal.Criteria) == 0 {
 		return errors.New("cannot accept an incomplete specification")
 	}
-	if proposal.SourceHash != normalizedIssueHash(w.IssueBody) {
+	if !sourceMatchesIssue(*w, proposal.SourceHash) {
 		return errors.New("the proposal does not match the current Issue; use `/ai analyze` to refresh it")
 	}
 	seen := map[string]bool{}
@@ -678,9 +692,9 @@ func analyzeAllowed(w domain.Workflow) bool {
 	case "INTAKE", "NEEDS_INFO":
 		return w.Control == "ACTIVE" || w.Control == "PAUSED"
 	case "TRIAGE", "SPEC_READY", "DEFERRED", "REJECT_PROPOSED", "REJECTED", "BLOCKED":
-		return w.Control != "ACTIVE" && (!w.Spec.Approved || normalizedIssueHash(w.IssueBody) != w.Spec.SourceHash)
+		return w.Control != "ACTIVE" && (!w.Spec.Approved || !sourceMatchesIssue(w, w.Spec.SourceHash))
 	default:
-		return w.Spec.Approved && normalizedIssueHash(w.IssueBody) != w.Spec.SourceHash && w.Control == "PAUSED"
+		return w.Spec.Approved && !sourceMatchesIssue(w, w.Spec.SourceHash) && w.Control == "PAUSED"
 	}
 }
 
@@ -745,7 +759,7 @@ func (e *Engine) ForceApprovalCurrent(ctx context.Context, w domain.Workflow) bo
 }
 
 func (e *Engine) IssueMatchesApprovedSpec(w domain.Workflow) bool {
-	return w.Spec.Approved && normalizedIssueHash(w.IssueBody) == w.Spec.SourceHash
+	return w.Spec.Approved && sourceMatchesIssue(w, w.Spec.SourceHash)
 }
 
 func (e *Engine) forceAccept(ctx context.Context, w domain.Workflow, actor string) error {
@@ -779,14 +793,14 @@ func (e *Engine) forceAcceptIssue(ctx context.Context, w domain.Workflow, actor 
 		if issue.State != "open" {
 			return errors.New("forceaccept requires an open source Issue")
 		}
-		if issue.Title != w.IssueTitle || normalizedIssueHash(issue.Body) != normalizedIssueHash(w.IssueBody) {
+		if issue.Title != w.IssueTitle || normalizedIssueSourceHash(issue.Title, issue.Body) != normalizedIssueSourceHash(w.IssueTitle, w.IssueBody) {
 			return errors.New("the Issue changed since this view was loaded; reconcile it and review the updated request before forceaccept")
 		}
 	}
 	proposal := domain.Spec{}
 	if err := validateProposalSpec(&w, w.ProposalSpec); err == nil {
 		proposal = *w.ProposalSpec
-	} else if w.Spec.Approved && normalizedIssueHash(w.IssueBody) == w.Spec.SourceHash {
+	} else if w.Spec.Approved && sourceMatchesIssue(w, w.Spec.SourceHash) {
 		proposal = w.Spec
 	} else {
 		criteria := append([]domain.Criterion(nil), w.Spec.Criteria...)
@@ -797,7 +811,7 @@ func (e *Engine) forceAcceptIssue(ctx context.Context, w domain.Workflow, actor 
 			Criteria:    criteria,
 			NonGoals:    append([]string(nil), w.Spec.NonGoals...),
 			Risk:        "Manual force acceptance; analysis and specification review were bypassed.",
-			SourceHash:  normalizedIssueHash(w.IssueBody),
+			SourceHash:  normalizedIssueSourceHash(w.IssueTitle, w.IssueBody),
 		}
 	}
 	proposal.Approved = true
@@ -809,7 +823,7 @@ func (e *Engine) forceAcceptIssue(ctx context.Context, w domain.Workflow, actor 
 	cancelWorker := e.active[w.ID]
 	e.mu.RUnlock()
 	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-		if !forceIssueStage(*x) || x.Generation != w.Generation || x.Version != w.Version || normalizedIssueHash(x.IssueBody) != proposal.SourceHash {
+		if !forceIssueStage(*x) || x.Generation != w.Generation || x.Version != w.Version || !sourceMatchesIssue(*x, proposal.SourceHash) {
 			return nil, errors.New("workflow changed before forceaccept could start development")
 		}
 		x.Generation++
@@ -825,7 +839,7 @@ func (e *Engine) forceAcceptIssue(ctx context.Context, w domain.Workflow, actor 
 		x.LastError = "Development started by explicit /ai forceaccept; model triage and specification review were bypassed."
 		key := e.key(ctx, *x)
 		policy := e.repository(*x)
-		x.ForceApproval = &domain.ForceApproval{Kind: "issue_development", Actor: actor, Command: "forceaccept", ApprovedAt: now, Generation: x.Generation, SpecDigest: x.Spec.Digest, PolicyDigest: domain.Digest(policy), VerificationKey: key, IssueHash: normalizedIssueHash(x.IssueBody), Bypassed: bypassed, PriorConstraints: append([]domain.Criterion(nil), w.Spec.Criteria...), Discussion: append([]string(nil), w.Discussion...)}
+		x.ForceApproval = &domain.ForceApproval{Kind: "issue_development", Actor: actor, Command: "forceaccept", ApprovedAt: now, Generation: x.Generation, SpecDigest: x.Spec.Digest, PolicyDigest: domain.Digest(policy), VerificationKey: key, IssueHash: normalizedIssueSourceHash(x.IssueTitle, x.IssueBody), Bypassed: bypassed, PriorConstraints: append([]domain.Criterion(nil), w.Spec.Criteria...), Discussion: append([]string(nil), w.Discussion...)}
 		return []store.Action{gateAction(*x, false, "manual forceaccept restarted development; previous PR gate approval is revoked"), statusAction(*x)}, nil
 	})
 	if err == nil && cancelWorker != nil {
@@ -957,6 +971,15 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 	if err != nil {
 		return err
 	}
+	ownPublish, err := e.inFlightPublishMatches(ctx, w, latest)
+	if err != nil {
+		return fmt.Errorf("verify in-flight publish identity: %w", err)
+	}
+	if ownPublish {
+		// Wait for publishGitHub to commit its receipt so its generation fence
+		// does not mistake its own webhook for an outside branch update.
+		return nil
+	}
 	pr := &latest
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 		if pr.Merged {
@@ -970,12 +993,14 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 			return []store.Action{statusAction(*x)}, nil
 		}
 		if pr.State == "closed" {
-			if x.Phase == "BLOCKED" && x.Control == "PAUSED" {
+			if x.Phase == "BLOCKED" && x.LastError == "pull request was closed without a confirmed merge" {
 				return nil, store.ErrNoChange
 			}
 			x.Generation++
 			x.Phase = "BLOCKED"
-			x.Control = "PAUSED"
+			if x.Control == "ACTIVE" || x.Control == "PAUSING" {
+				x.Control = "PAUSED"
+			}
 			x.LastError = "pull request was closed without a confirmed merge"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
@@ -985,7 +1010,9 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 			}
 			x.Generation++
 			x.PRReady = false
-			x.Control = "PAUSING"
+			if x.Control == "ACTIVE" {
+				x.Control = "PAUSING"
+			}
 			x.LastError = "pull request was converted to draft; maintainer review required"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
@@ -996,7 +1023,10 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 		if pr.Head.SHA != "" && x.HeadSHA != "" && pr.Head.SHA != x.HeadSHA {
 			x.Generation++
 			x.HeadSHA = pr.Head.SHA
-			x.Control = "PAUSING"
+			if x.Control == "ACTIVE" {
+				x.Control = "PAUSING"
+			}
+			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "pull request head changed outside this workflow; reconcile before continuing"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
@@ -1004,7 +1034,9 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 			x.Generation++
 			x.BaseBranch = pr.Base.Ref
 			x.BaseSHA = pr.Base.SHA
-			x.Control = "PAUSING"
+			if x.Control == "ACTIVE" {
+				x.Control = "PAUSING"
+			}
 			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "PR target branch changed; resume to verify the current target"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
@@ -1158,13 +1190,13 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 	}
 	manual := d.Pass && d.ManualOverride
 	if d.Pass {
-		if manual {
-			policy := e.repository(current)
-			currentKey := e.key(ctx, current)
-			if current.Generation != a.Generation || !manualForceIdentity(current, current.ForceApproval, currentKey, domain.Digest(policy)) || current.Review.Key != d.Key || current.HeadSHA != d.SHA {
-				return nil, store.ErrStale, false
+		if current.Generation != a.Generation || current.Control != "ACTIVE" || (current.Phase != "READY" && current.Phase != "AWAITING_MAINTAINER") {
+			return nil, store.ErrStale, false
+		}
+		if !e.gateActionMatchesCurrent(ctx, current, a, d, manual) {
+			if err := e.invalidateLocalGateIdentity(ctx, current, "review key, evidence, or manual override does not match the current candidate"); err != nil {
+				return nil, err, false
 			}
-		} else if current.Generation != a.Generation || current.Review.Key != d.Key || current.HeadSHA != d.SHA || current.Control != "ACTIVE" || (current.Phase != "READY" && current.Phase != "AWAITING_MAINTAINER") {
 			return nil, store.ErrStale, false
 		}
 	}
@@ -1178,6 +1210,26 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 	c, owner, repo, err := e.client(ctx, current)
 	if err != nil {
 		return nil, err, false
+	}
+	var confirmedPR gh.PullRequest
+	if d.Pass {
+		confirmedPR, err = c.GetPullRequest(ctx, owner, repo, current.PR)
+		if err != nil {
+			return nil, err, outcomeUnknown(err)
+		}
+		if reason := remotePRIdentityReason(current, confirmedPR); reason != "" {
+			if driftErr := e.recordGateIdentityDrift(ctx, current, confirmedPR, reason); driftErr != nil {
+				return nil, driftErr, false
+			}
+			return nil, fmt.Errorf("%w: %s", store.ErrStale, reason), false
+		}
+		latest, getErr := e.Store.Get(ctx, current.ID)
+		if getErr != nil {
+			return nil, getErr, false
+		}
+		if latest.Version != current.Version || !e.gateActionMatchesCurrent(ctx, latest, a, d, manual) {
+			return nil, store.ErrStale, false
+		}
 	}
 	keySummary := d.Reason
 	if manual && current.ForceApproval != nil {
@@ -1196,6 +1248,28 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 	checks, findErr := c.ListCheckRuns(ctx, owner, repo, targetSHA)
 	if findErr != nil {
 		return nil, findErr, false
+	}
+	if d.Pass {
+		// ListCheckRuns is a network round trip. Re-read the candidate immediately
+		// before publishing green so a ref/base change during that interval cannot
+		// inherit the earlier PR snapshot.
+		latestPR, verifyErr := c.GetPullRequest(ctx, owner, repo, current.PR)
+		if verifyErr != nil {
+			return nil, verifyErr, outcomeUnknown(verifyErr)
+		}
+		if reason := remotePRIdentityReason(current, latestPR); reason != "" {
+			if driftErr := e.recordGateIdentityDrift(ctx, current, latestPR, reason); driftErr != nil {
+				return nil, driftErr, false
+			}
+			return nil, fmt.Errorf("%w: %s", store.ErrStale, reason), false
+		}
+		latestWorkflow, verifyErr := e.Store.Get(ctx, current.ID)
+		if verifyErr != nil {
+			return nil, verifyErr, false
+		}
+		if latestWorkflow.Version != current.Version || !e.gateActionMatchesCurrent(ctx, latestWorkflow, a, d, manual) {
+			return nil, store.ErrStale, false
+		}
 	}
 	var prior *gh.CheckRun
 	for i := range checks {
@@ -1221,14 +1295,43 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 		for _, candidate := range latest {
 			if candidate.Name == input.Name && candidate.App.ID == e.Config().GitHub.AppID {
 				if candidate.Status == input.Status && candidate.Conclusion == input.Conclusion && candidate.Output.Summary == input.Output.Summary {
-					return candidate, nil, false
+					check = candidate
+					err = nil
+					break
 				}
 				if prior != nil && candidate.ID == prior.ID {
 					return nil, err, true
 				}
 			}
 		}
-		return nil, err, true
+		if err != nil {
+			return nil, err, true
+		}
+	}
+	if d.Pass {
+		livePR, liveErr := c.GetPullRequest(ctx, owner, repo, current.PR)
+		latest, getErr := e.Store.Get(ctx, current.ID)
+		driftReason := ""
+		if liveErr != nil {
+			driftReason = "could not recheck PR identity after gate publication"
+		} else {
+			driftReason = remotePRIdentityReason(current, livePR)
+		}
+		if getErr != nil || latest.Version != current.Version || !e.gateActionMatchesCurrent(ctx, latest, a, d, manual) {
+			if driftReason == "" {
+				driftReason = "workflow identity changed during gate publication"
+			}
+		}
+		if driftReason != "" {
+			revokeErr := e.revokeGateSuccess(ctx, c, owner, repo, check, input, driftReason)
+			if liveErr == nil {
+				_ = e.recordGateIdentityDrift(ctx, current, livePR, driftReason)
+			}
+			if revokeErr != nil {
+				return check, revokeErr, true
+			}
+			return check, fmt.Errorf("%w: %s", store.ErrStale, driftReason), false
+		}
 	}
 	if targetSHA == current.HeadSHA && current.Generation == a.Generation {
 		if d.Pass {
@@ -1236,11 +1339,7 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 			if latestErr != nil {
 				return check, latestErr, false
 			}
-			valid := latest.Generation == a.Generation && latest.Control == "ACTIVE" && latest.Review.Key == d.Key && latest.HeadSHA == d.SHA
-			if manual {
-				policy := e.repository(latest)
-				valid = latest.Generation == a.Generation && manualForceIdentity(latest, latest.ForceApproval, e.key(ctx, latest), domain.Digest(policy)) && latest.Review.Key == d.Key && latest.HeadSHA == d.SHA
-			}
+			valid := e.gateActionMatchesCurrent(ctx, latest, a, d, manual)
 			if valid {
 				if _, bodyErr := c.UpdateOwnedPRBody(ctx, owner, repo, latest.PR, prOwnedSummary(latest)); bodyErr != nil {
 					return check, bodyErr, outcomeUnknown(bodyErr)
@@ -1248,11 +1347,9 @@ func (e *Engine) publishGate(ctx context.Context, w domain.Workflow, a store.Act
 			}
 		}
 		_ = e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-			valid := x.Generation == a.Generation && x.Review.Key == d.Key && x.HeadSHA == d.SHA
-			if manual {
-				policy := e.repository(*x)
-				valid = x.Generation == a.Generation && manualForceIdentity(*x, x.ForceApproval, e.key(ctx, *x), domain.Digest(policy)) && x.Review.Key == d.Key && x.HeadSHA == d.SHA
-			}
+			valid := x.Generation == a.Generation && x.Version == current.Version && x.Control == "ACTIVE" &&
+				(x.Phase == "READY" || x.Phase == "AWAITING_MAINTAINER") && x.PRReady && x.PR == current.PR &&
+				x.HeadSHA == current.HeadSHA && x.BaseSHA == current.BaseSHA && x.BaseBranch == current.BaseBranch && x.Review.Key == d.Key
 			if !valid {
 				if !d.Pass && x.HeadSHA == targetSHA {
 					x.CheckID = check.ID

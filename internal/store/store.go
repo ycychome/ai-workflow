@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS audit(id bigserial PRIMARY KEY,workflow_id text,kind 
 CREATE TABLE IF NOT EXISTS gate_decisions(id text PRIMARY KEY,workflow_id text NOT NULL REFERENCES workflows(id),generation bigint NOT NULL,verification_key text NOT NULL,data jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS processed_commands(command_id text NOT NULL,workflow_id text NOT NULL REFERENCES workflows(id),created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(command_id,workflow_id));
 INSERT INTO schema_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
+-- One-time binding of legacy approvals to the title persisted at upgrade.
+-- Fence old-process snapshots so they cannot overwrite this new provenance.
+DO $$ BEGIN
+ PERFORM pg_advisory_xact_lock(1634309990,2);
+ IF NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=2) THEN
+  UPDATE workflows SET version=version+1,
+   data=jsonb_set(data,'{legacy_issue_title}',COALESCE(data->'issue_title','""'::jsonb))
+  WHERE NOT(data ? 'legacy_issue_title') AND
+   (length(data->'spec'->>'source_hash')=64 OR length(data->'proposal_spec'->>'source_hash')=64);
+  INSERT INTO schema_migrations(version) VALUES(2);
+ END IF;
+END $$;
 `)
 	return e
 }
@@ -323,6 +335,9 @@ func insertActions(ctx context.Context, tx pgx.Tx, actions []Action) error {
 	}
 	return nil
 }
+
+// Save fences every execution field while preserving discussion appended since
+// the worker snapshot. Comments cannot replace task state or invalidate a lease.
 func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action) error {
 	old := w.Version
 	w.Version++
@@ -334,14 +349,18 @@ func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action)
 		return e
 	}
 	defer tx.Rollback(ctx)
-	tag, e := tx.Exec(ctx, "UPDATE workflows SET data=$2,phase=$3,control=$4,version=$5,updated_at=now() WHERE id=$1 AND version=$6 AND generation=$7 AND lease_owner=$8 AND lease_until>now()", w.ID, b, w.Phase, w.Control, w.Version, old, w.Generation, w.LeaseOwner)
+	var discussion []byte
+	e = tx.QueryRow(ctx, "UPDATE workflows SET data=jsonb_set($2::jsonb,'{discussion}',COALESCE(data->'discussion','[]'::jsonb)),phase=$3,control=$4,version=$5,updated_at=now() WHERE id=$1 AND version=$6 AND generation=$7 AND lease_owner=$8 AND lease_until>now() RETURNING data->'discussion'", w.ID, b, w.Phase, w.Control, w.Version, old, w.Generation, w.LeaseOwner).Scan(&discussion)
 	if e != nil {
 		w.Version = old
+		if errors.Is(e, pgx.ErrNoRows) {
+			return ErrStale
+		}
 		return e
 	}
-	if tag.RowsAffected() != 1 {
+	if e = json.Unmarshal(discussion, &w.Discussion); e != nil {
 		w.Version = old
-		return ErrStale
+		return e
 	}
 	if w.Review.Key != "" && (w.Review.Verdict == "PASS" || w.Review.Verdict == "CHANGES_REQUESTED" || w.Review.Verdict == "BLOCKED") {
 		d := domain.GateDecision{ID: domain.Digest([]any{w.ID, w.Generation, w.Version, w.Review.Key, w.Review.Verdict}), WorkflowID: w.ID, Generation: w.Generation, VerificationKey: w.Review.Key, SpecDigest: w.Spec.Digest, BaseSHA: w.BaseSHA, HeadSHA: w.HeadSHA, Verdict: w.Review.Verdict, Reason: w.Review.Reason, Evidence: w.Evidence, Coverage: w.Review.Obligations, Findings: w.Review.Findings, CreatedAt: time.Now().UTC()}
@@ -379,6 +398,7 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 	if expected, ok := ctx.Value(expectedStateContextKey{}).(expectedWorkflowState); ok && (w.Generation != expected.Generation || w.HeadSHA != expected.HeadSHA) {
 		return ErrStale
 	}
+	executionBefore := executionDigest(w)
 	oldPhase := w.Phase
 	oldControl := w.Control
 	oldReview, _ := json.Marshal(w.Review)
@@ -403,7 +423,9 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 	if w.Generation < oldGeneration {
 		return errors.New("workflow generation cannot move backwards")
 	}
-	w.Version++
+	if executionDigest(w) != executionBefore {
+		w.Version++
+	}
 	w.UpdatedAt = time.Now().UTC()
 	b, err := json.Marshal(w)
 	if err != nil {
@@ -779,4 +801,11 @@ AND state IN ('running','unknown') AND kind IN ('publish','gate','ready')`, id).
 func NewAction(w domain.Workflow, kind string, data any) Action {
 	b, _ := json.Marshal(data)
 	return Action{ID: fmt.Sprintf("%s:%d:%d:%s:%s", w.ID, w.Generation, w.Version, kind, domain.Digest(data)[:12]), WorkflowID: w.ID, Generation: w.Generation, Kind: kind, Data: b}
+}
+
+// Discussion is metadata; every other workflow field remains part of the
+// execution version fence, including controls, specifications and review state.
+func executionDigest(w domain.Workflow) string {
+	w.Discussion = nil
+	return domain.Digest(w)
 }

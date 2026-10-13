@@ -47,15 +47,15 @@ func (e *Engine) Invalidate(ctx context.Context, reason string) error {
 		return err
 	}
 	for _, w := range ws {
-		if w.Phase == "MERGED" || w.Phase == "INTAKE" || w.Phase == "WAITING_CONFIGURATION" || w.Control == "CANCELLED" {
+		if w.Phase == "MERGED" || w.Phase == "INTAKE" || w.Phase == "WAITING_CONFIGURATION" {
 			continue
 		}
 		e.stop(w.ID)
 		if err = e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-			x.Generation++
-			x.Control = "PAUSING"
-			x.Review.Verdict = "OBSOLETE"
-			x.LastError = reason
+			if x.Phase == "MERGED" || x.Phase == "INTAKE" || x.Phase == "WAITING_CONFIGURATION" {
+				return nil, store.ErrNoChange
+			}
+			invalidateWorkflow(x, reason)
 			return []store.Action{gateAction(*x, false, reason), statusAction(*x)}, nil
 		}); err != nil {
 			return err
@@ -81,24 +81,50 @@ func (e *Engine) SetConfig(ctx context.Context, c config.Config) error {
 		return err
 	}
 	changed := domain.Digest(old.Repositories) != domain.Digest(c.Repositories) || old.Runner.Image != c.Runner.Image || old.Runner.Mode != c.Runner.Mode || domain.Digest(old.Model) != domain.Digest(c.Model)
+	configurationReady := c.Runner.Mode != "responses" || c.ModelReady()
 	for _, w := range ws {
 		if w.Phase == "WAITING_CONFIGURATION" {
 			_ = e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+				if x.Phase != "WAITING_CONFIGURATION" {
+					return nil, store.ErrNoChange
+				}
+				var actions []store.Action
+				if changed {
+					x.Generation++
+					x.Review.Verdict = "OBSOLETE"
+					x.LastError = "configuration changed; resume to reconcile and reverify"
+					actions = append(actions, gateAction(*x, false, x.LastError))
+				}
+				// A configuration save may release a workflow waiting for setup,
+				// but it must not undo a maintainer stop or takeover.
+				if x.Control != "ACTIVE" {
+					if !changed {
+						return nil, store.ErrNoChange
+					}
+					return append(actions, statusAction(*x)), nil
+				}
+				if !configurationReady {
+					if !changed {
+						return nil, store.ErrNoChange
+					}
+					x.LastError = "fill in Responses endpoint, Token and Dev/Review model names in Settings"
+					return append(actions, statusAction(*x)), nil
+				}
 				if x.Spec.Approved {
 					x.Phase = "PLANNING"
 				} else {
 					x.Phase = "TRIAGE"
 				}
 				x.LastError = ""
-				return []store.Action{statusAction(*x)}, nil
+				return append(actions, statusAction(*x)), nil
 			})
 		} else if changed && w.Phase != "MERGED" && w.Phase != "INTAKE" {
 			e.stop(w.ID)
 			_ = e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-				x.Generation++
-				x.Review.Verdict = "OBSOLETE"
-				x.Control = "PAUSING"
-				x.LastError = "configuration changed; resume to reconcile and reverify"
+				if x.Phase == "MERGED" || x.Phase == "INTAKE" || x.Phase == "WAITING_CONFIGURATION" {
+					return nil, store.ErrNoChange
+				}
+				invalidateWorkflow(x, "configuration changed; resume to reconcile and reverify")
 				return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 			})
 		}
@@ -110,6 +136,19 @@ func (e *Engine) SetConfig(ctx context.Context, c config.Config) error {
 	}
 	return nil
 }
+
+// invalidateWorkflow advances the verification generation while preserving
+// any control state already chosen by a maintainer. Only active work enters
+// the asynchronous pause transition.
+func invalidateWorkflow(w *domain.Workflow, reason string) {
+	w.Generation++
+	if w.Control == "ACTIVE" {
+		w.Control = "PAUSING"
+	}
+	w.Review.Verdict = "OBSOLETE"
+	w.LastError = reason
+}
+
 func (e *Engine) App() (*gh.Client, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

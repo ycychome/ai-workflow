@@ -34,7 +34,7 @@ func TestApplyTriageReportApprovalModes(t *testing.T) {
 			if w.Phase != "PLANNING" || w.ProposalSpec != nil || !w.Spec.Approved || w.Spec.ApprovedBy != "ai:dev-triage" {
 				t.Fatalf("automatic approval did not enter development: %+v", w)
 			}
-			if w.Spec.SourceHash != normalizedIssueHash(w.IssueBody) || w.Spec.Digest != domain.SpecDigest(w.Spec) || w.LastError != "" {
+			if w.Spec.SourceHash != normalizedIssueSourceHash(w.IssueTitle, w.IssueBody) || w.Spec.Digest != domain.SpecDigest(w.Spec) || w.LastError != "" {
 				t.Fatalf("approved specification identity is incomplete: %+v", w.Spec)
 			}
 		})

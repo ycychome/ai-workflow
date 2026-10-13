@@ -66,7 +66,7 @@ func applyTriageReport(w *domain.Workflow, report triageReport, requireAcceptFor
 			}
 			seen[c.ID] = true
 		}
-		proposal := domain.Spec{Revision: w.Spec.Revision + 1, Title: report.Title, Description: report.Description, Criteria: report.Criteria, NonGoals: report.NonGoals, Risk: report.Risk, SourceHash: normalizedIssueHash(w.IssueBody)}
+		proposal := domain.Spec{Revision: w.Spec.Revision + 1, Title: report.Title, Description: report.Description, Criteria: report.Criteria, NonGoals: report.NonGoals, Risk: report.Risk, SourceHash: normalizedIssueSourceHash(w.IssueTitle, w.IssueBody)}
 		proposal.Digest = domain.SpecDigest(proposal)
 		if requireAcceptForDevelopment {
 			w.ProposalSpec = &proposal

@@ -92,7 +92,7 @@ func TestManualForceApprovalIsBoundToExactPRIdentity(t *testing.T) {
 
 func TestAcceptNeedsValidProposalAndAnalyzeIsNotAcceptance(t *testing.T) {
 	w := domain.Workflow{Phase: "SPEC_READY", Control: "ACTIVE", IssueBody: "request"}
-	p := &domain.Spec{Title: "title", Description: "description", SourceHash: normalizedIssueHash(w.IssueBody), Criteria: []domain.Criterion{{ID: "AC1", Description: "done"}}}
+	p := &domain.Spec{Title: "title", Description: "description", SourceHash: normalizedIssueSourceHash(w.IssueTitle, w.IssueBody), Criteria: []domain.Criterion{{ID: "AC1", Description: "done"}}}
 	p.Digest = domain.SpecDigest(*p)
 	if err := validateProposalSpec(&w, p); err != nil {
 		t.Fatalf("valid proposal rejected: %v", err)

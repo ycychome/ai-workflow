@@ -95,7 +95,7 @@ func TestForceCommandsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Phase != "PLANNING" || !got.Spec.Approved || got.Spec.SourceHash != normalizedIssueHash(dev.IssueBody) || !strings.Contains(got.Spec.Description, dev.IssueBody) || !strings.Contains(got.Spec.Description, "preserve this constraint") || got.ForceApproval == nil || got.ForceApproval.Kind != "issue_development" {
+	if got.Phase != "PLANNING" || !got.Spec.Approved || got.Spec.SourceHash != normalizedIssueSourceHash(dev.IssueTitle, dev.IssueBody) || !strings.Contains(got.Spec.Description, dev.IssueBody) || !strings.Contains(got.Spec.Description, "preserve this constraint") || got.ForceApproval == nil || got.ForceApproval.Kind != "issue_development" {
 		t.Fatalf("forceaccept dev did not preserve and approve the full request: phase=%s", got.Phase)
 	}
 

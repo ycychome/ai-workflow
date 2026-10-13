@@ -328,7 +328,7 @@ func (m *Manager) ReadFile(ctx context.Context, w *Workspace, filePath string) (
 		return nil, errors.New("Git metadata is not part of the source workspace")
 	}
 	var out bytes.Buffer
-	if err := m.archiveCommand(ctx, w, &out, "tar", "-cf", "-", "-C", "/workspace", "--", clean); err != nil {
+	if err := m.archiveCommand(ctx, w, &out, workspaceTarArgs(clean)...); err != nil {
 		return nil, err
 	}
 	tr := tar.NewReader(&out)
@@ -391,7 +391,7 @@ func (m *Manager) List(ctx context.Context, w *Workspace, dir string) ([]Entry, 
 			return nil, errors.New("Git metadata is not part of the source workspace")
 		}
 	}
-	out, err := m.archiveOutput(ctx, w, "tar", "--exclude-vcs", "-cf", "-", "-C", "/workspace", "--", clean)
+	out, err := m.archiveOutput(ctx, w, workspaceTarArgs(clean)...)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +427,7 @@ func (m *Manager) Search(ctx context.Context, w *Workspace, query string) ([]Mat
 	if query == "" || strings.ContainsAny(query, "\x00\r\n") {
 		return nil, errors.New("search query must not be empty")
 	}
-	out, err := m.archiveOutput(ctx, w, "tar", "--exclude-vcs", "-cf", "-", "-C", "/workspace", ".")
+	out, err := m.archiveOutput(ctx, w, workspaceTarArgs(".")...)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +479,7 @@ func (m *Manager) CollectChanges(ctx context.Context, w *Workspace) ([]Change, e
 	if err := m.checkWorkspace(w); err != nil {
 		return nil, err
 	}
-	out, err := m.archiveOutput(ctx, w, "tar", "--exclude-vcs", "-cf", "-", "-C", "/workspace", ".")
+	out, err := m.archiveOutput(ctx, w, workspaceTarArgs(".")...)
 	if err != nil {
 		return nil, err
 	}
@@ -826,6 +826,21 @@ type snapshotMeta struct {
 
 func sortChanges(changes []Change) {
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+}
+
+// workspaceTarArgs excludes only actual .git directories and their contents.
+// GNU tar's --exclude-vcs also filters normal source files such as
+// .gitignore and .gitattributes. Include both leading-dot and non-leading-dot
+// patterns because archives of "." name entries as "./path", while archives
+// of a named directory use "path/...".
+func workspaceTarArgs(target string) []string {
+	return []string{
+		"tar",
+		"--exclude=.git", "--exclude=.git/", "--exclude=.git/*",
+		"--exclude=./.git", "--exclude=./.git/", "--exclude=./.git/*",
+		"--exclude=*/.git", "--exclude=*/.git/", "--exclude=*/.git/*",
+		"-cf", "-", "-C", "/workspace", "--", target,
+	}
 }
 
 func hasGitComponent(p string) bool {
