@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -16,6 +17,22 @@ import urllib.request
 
 PROFILES = {"A": "builder_ci", "B": "single_review", "C": "full"}
 TERMINAL = {"EVALUATION_COMPLETE", "APPROVED", "MERGED", "FAILED", "CANCELLED", "ARCHIVED", "REJECTED"}
+EXPERIMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,23}$", re.ASCII)
+TRIAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$", re.ASCII)
+
+def checked_experiment_id(value):
+    if value is None or value == "":
+        return ""
+    if not EXPERIMENT_ID.fullmatch(value):
+        raise ValueError("experiment-id 必须是 1–24 位 ASCII 字母数字、点、下划线或连字符，并以字母数字开头")
+    return value
+
+def namespaced_trial_id(experiment_id, trial_id):
+    experiment_id = checked_experiment_id(experiment_id)
+    result = experiment_id + "." + trial_id if experiment_id else trial_id
+    if len(result) > 100 or not TRIAL_ID.fullmatch(result):
+        raise ValueError("试验 ID 超出评估 API 的安全长度或字符范围")
+    return result
 
 def digest_bytes(data):
     return hashlib.sha256(data).hexdigest()
@@ -56,42 +73,54 @@ def checked_manifest(path):
 def make_plan(args):
     manifest, manifest_digest = checked_manifest(args.manifest)
     matrix = read(args.matrix)
-    snapshots = read(args.snapshots)["trials"]
+    snapshot_root = read(args.snapshots)
+    experiment_id = checked_experiment_id(getattr(args, "experiment_id", None))
+    if snapshot_root.get("experiment_id", "") != experiment_id:
+        raise ValueError("准备快照属于不同评估批次")
+    snapshots = snapshot_root["trials"]
     by_id = {x["trial_id"]: x for x in snapshots}
     if len(by_id) != len(snapshots):
         raise ValueError("重复试验 ID")
     if matrix["manifest_version"] != manifest["version"] or len(matrix["runs"]) != 90:
         raise ValueError("矩阵不是冻结的 90 次开发试验")
     expected_runs = {f"{task['id']}-{arm}-{repeat}" for task in manifest["tasks"] for arm in PROFILES for repeat in range(1, 4)}
-    if {run["run_key"] for run in matrix["runs"]} != expected_runs:
+    task_ids = {task["id"] for task in manifest["tasks"]}
+    if {run["run_key"] for run in matrix["runs"]} != expected_runs or any(
+        run.get("task_id", run.get("task")) not in task_ids or
+        run.get("arm") not in PROFILES or
+        run["run_key"] != f"{run.get('task_id', run.get('task'))}-{run.get('arm')}-{run.get('repeat', run.get('repetition'))}"
+        for run in matrix["runs"]
+    ):
         raise ValueError("矩阵缺少冻结的三组各三次任务 ID")
     trials = []
     for task in manifest["tasks"]:
-        trials.append({"trial_id": "smoke-" + task["id"], "kind": "smoke", "task_id": task["id"], "profile": "full", "candidate_id": task["id"] + "-defect", "repeat": 1})
+        trials.append({"trial_id": namespaced_trial_id(experiment_id, "smoke-" + task["id"]), "experiment_id": experiment_id, "kind": "smoke", "task_id": task["id"], "profile": "full", "candidate_id": task["id"] + "-defect", "repeat": 1})
     development = []
     for run in matrix["runs"]:
         task = run.get("task_id", run.get("task"))
-        development.append({"trial_id": run["run_key"], "kind": "development", "task_id": task, "profile": PROFILES[run["arm"]], "candidate_id": task + "-defect", "repeat": run.get("repeat", run.get("repetition")), "arm": run["arm"]})
+        development.append({"trial_id": namespaced_trial_id(experiment_id, run["run_key"]), "run_key": run["run_key"], "experiment_id": experiment_id, "kind": "development", "task_id": task, "profile": PROFILES[run["arm"]], "candidate_id": task + "-defect", "repeat": run.get("repeat", run.get("repetition")), "arm": run["arm"]})
     random.Random(args.seed).shuffle(development)
     trials += development
     reviews = []
     for pair in manifest["review_pairs"]:
         for candidate in pair["candidates"]:
-            reviews.append({"trial_id": "review-" + hashlib.sha256((str(args.seed) + ":" + candidate["candidate_id"]).encode()).hexdigest()[:20], "kind": "review", "task_id": pair["pair_id"], "profile": "full", "candidate_id": candidate["candidate_id"], "repeat": 1})
+            reviews.append({"trial_id": namespaced_trial_id(experiment_id, "review-" + hashlib.sha256((str(args.seed) + ":" + candidate["candidate_id"]).encode()).hexdigest()[:20]), "experiment_id": experiment_id, "kind": "review", "task_id": pair["pair_id"], "profile": "full", "candidate_id": candidate["candidate_id"], "repeat": 1})
     random.Random(args.seed + 1).shuffle(reviews)
     trials += reviews
     if len(trials) != 120 or len({trial["trial_id"] for trial in trials}) != 120:
         raise ValueError("应恰有 10 smoke、90 development、20 review")
     for trial in trials:
         snap = by_id.get(trial["trial_id"])
-        if snap is None or any(snap.get(k) != v for k, v in trial.items() if k != "arm"):
+        legacy_run_key = experiment_id == "" and trial["kind"] == "development" and snap is not None and "run_key" not in snap
+        legacy_experiment_id = experiment_id == "" and snap is not None and "experiment_id" not in snap
+        if snap is None or any(snap.get(k) != v for k, v in trial.items() if k != "arm" and not (k == "run_key" and legacy_run_key) and not (k == "experiment_id" and legacy_experiment_id)):
             raise ValueError("试验缺少匹配的受信基线：" + trial["trial_id"])
         if snap["config_digest"] != matrix["config_sha256"] or snap["manifest_digest"] != manifest_digest or snap["seed"] != args.seed:
             raise ValueError("试验配置、清单或随机种子不一致")
         trial["request"] = {"trial_id": trial["trial_id"], "config_digest": snap["config_digest"], "manifest_digest": manifest_digest}
     if Path(args.output).exists():
         raise ValueError("计划已存在；拒绝覆盖不可变试验计划")
-    atomic(args.output, {"version": 1, "protocol": "alpha-evaluation/v1", "manifest_digest": manifest_digest, "config_sha256": matrix["config_sha256"], "config": matrix["config"], "seed": args.seed, "trials": trials, "human_review": "pending", "human_merge": "pending"})
+    atomic(args.output, {"version": 1, "protocol": "alpha-evaluation/v1", "experiment_id": experiment_id, "manifest_digest": manifest_digest, "config_sha256": matrix["config_sha256"], "config": matrix["config"], "seed": args.seed, "trials": trials, "human_review": "pending", "human_merge": "pending"})
     print("已生成 120 个冻结试验计划；尚未执行。")
 
 class Control:
@@ -151,7 +180,7 @@ def record_result(control, trial, snapshot, out):
     budget = snapshot["config"]["budget"]
     exhausted = workflow["model_calls"] >= budget["issue_calls"] or workflow["runtime_seconds"] >= budget["issue_minutes"] * 60
     outcome = "success" if passed else "budget_exhausted" if exhausted else "cancelled" if workflow["control"] == "CANCELLED" else "infrastructure_error" if not verified else "failed"
-    result = {"kind": trial["kind"], "run_key": trial_id, "candidate_id": trial["candidate_id"], "config_sha256": trial["request"]["config_digest"], "manifest_sha256": trial["request"]["manifest_digest"], "profile": trial["profile"], "outcome": outcome, "tests_passed": tests_passed, "trusted_judgment": judgment, "model_calls": workflow["model_calls"], "input_tokens": workflow["input_tokens"], "output_tokens": workflow["output_tokens"], "duration_seconds": workflow["runtime_seconds"], "cost": snapshot["cost"], "models": snapshot["models"], "effective_config": snapshot["config"], "workflow_id": workflow["id"], "issue_url": snapshot["issue_url"], "pull_request_url": snapshot["pull_request_url"], "verification_key": workflow["review"].get("key"), "evidence": receipts[0], "evidence_files": receipts, "human_review": "pending", "human_merge": "pending"}
+    result = {"kind": trial["kind"], "trial_id": trial_id, "experiment_id": trial.get("experiment_id", ""), "run_key": trial.get("run_key", trial_id), "candidate_id": trial["candidate_id"], "config_sha256": trial["request"]["config_digest"], "manifest_sha256": trial["request"]["manifest_digest"], "profile": trial["profile"], "outcome": outcome, "tests_passed": tests_passed, "trusted_judgment": judgment, "model_calls": workflow["model_calls"], "input_tokens": workflow["input_tokens"], "output_tokens": workflow["output_tokens"], "duration_seconds": workflow["runtime_seconds"], "cost": snapshot["cost"], "models": snapshot["models"], "effective_config": snapshot["config"], "workflow_id": workflow["id"], "issue_url": snapshot["issue_url"], "pull_request_url": snapshot["pull_request_url"], "verification_key": workflow["review"].get("key"), "evidence": receipts[0], "evidence_files": receipts, "human_review": "pending", "human_merge": "pending"}
     if trial["kind"] == "review":
         review_completed = any(t.get("status") == "ACCEPTED" and t.get("role") == "reviewer" for t in workflow["review"].get("tasks", []))
         result["reported_defect"] = any(f.get("state") not in ("RESOLVED", "REFUTED", "DISMISSED", "WAIVED") for f in workflow["review"].get("findings", [])) if review_completed else None
@@ -185,8 +214,8 @@ def run_plan(args):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         plan = read(args.plan)
-        import re
-        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", t["trial_id"]) for t in plan["trials"]):
+        experiment_id = checked_experiment_id(plan.get("experiment_id", ""))
+        if any(t.get("experiment_id", "") != experiment_id or not TRIAL_ID.fullmatch(t["trial_id"]) or len(t["trial_id"]) > 100 for t in plan["trials"]):
             raise ValueError("计划试验 ID 无效")
         for trial in plan["trials"]:
             path = out / "records" / (trial["trial_id"] + ".json")
@@ -205,7 +234,8 @@ def run_plan(args):
             if not record_path.exists():
                 continue
             record = read(record_path)
-            if record["config_sha256"] != plan["config_sha256"] or record["run_key"] != trial["trial_id"]:
+            expected_run_key = trial.get("run_key", trial["trial_id"])
+            if record["config_sha256"] != plan["config_sha256"] or record["run_key"] != expected_run_key or record.get("trial_id", trial["trial_id"]) != trial["trial_id"] or record.get("experiment_id", "") != experiment_id:
                 raise ValueError("既有回执绑定另一试验或配置")
             for evidence in record["evidence_files"]:
                 proof = (out / evidence["path"]).resolve()
@@ -296,6 +326,7 @@ def main():
     for name in ("manifest", "matrix", "snapshots", "output"):
         p.add_argument("--" + name, required=True)
     p.add_argument("--seed", type=int, required=True)
+    p.add_argument("--experiment-id", type=checked_experiment_id, help="可选批次前缀；省略时保留旧试验 ID")
     p.set_defaults(func=make_plan)
     p = sub.add_parser("run")
     for name in ("plan", "server", "token-file", "output"):

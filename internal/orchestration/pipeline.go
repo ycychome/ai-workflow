@@ -51,6 +51,16 @@ func validateReviewPlanReport(output json.RawMessage) error {
 	return nil
 }
 
+func developmentPlannerInput(w domain.Workflow, verificationCommands [][]string, verificationServices []string, remainingTasks int) map[string]any {
+	return map[string]any{
+		"spec": w.Spec, "expected_revision": w.PlanRevision, "current_tasks": w.Tasks,
+		"integration_records": w.IntegrationRecords, "source_artifacts": w.SourceArtifacts,
+		"last_error": w.LastError, "remaining_task_count": remainingTasks,
+		"findings": w.Review.Findings, "base_sha": w.BaseSHA, "head_sha": w.HeadSHA,
+		"verification_commands": verificationCommands, "verification_services": verificationServices,
+	}
+}
+
 type triageReport struct {
 	Decision    string             `json:"decision"`
 	Title       string             `json:"title"`
@@ -182,7 +192,9 @@ func (e *Engine) plan(ctx context.Context, w *domain.Workflow) (retErr error) {
 			report.Reason = "已检查任务完成事件，保留当前计划并交调度器继续"
 		}
 	} else {
-		out, err := session.ask(string(raw(map[string]any{"spec": w.Spec, "expected_revision": w.PlanRevision, "current_tasks": w.Tasks, "integration_records": w.IntegrationRecords, "source_artifacts": w.SourceArtifacts, "last_error": w.LastError, "remaining_task_count": e.Config().EffectiveMaxTasksPerWorkflow() - w.TasksCreated, "findings": w.Review.Findings, "base_sha": w.BaseSHA, "head_sha": w.HeadSHA})), session.readTools(), planSchema(), validateDevelopmentDelta)
+		repository := e.repository(*w)
+		input := developmentPlannerInput(*w, repository.Verification, repository.VerificationServices, e.Config().EffectiveMaxTasksPerWorkflow()-w.TasksCreated)
+		out, err := session.ask(string(raw(input)), session.readTools(), planSchema(), validateDevelopmentDelta)
 		w.Evidence = append(w.Evidence, session.listEvidence()...)
 		if err != nil {
 			return err

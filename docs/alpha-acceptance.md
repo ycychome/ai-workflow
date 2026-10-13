@@ -120,3 +120,16 @@
 提示版本 `zh-CN/v3`、执行字段 `runner.max_tool_calls_per_run` 和可信 CLI／协议已显式纳入新清单 `issuedesk-alpha-v3-tool-budget`。清单摘要 `45ed27b4f62f5b2f594777c1415cccb541fc8b563e40b2f85dea415c5419d86f`；有效配置摘要 `7d9ee4342ea0113c63f24c6d988c66c7c2aeada79bc6967c284f47dabc4c084b`，来自实际 API，预算与控制器返回逐项相等。版本审计证明服务基线、题面、变体、20 个标签及外部 driver／harness 的字节与 SHA-256 全部不变；新旧矩阵不能混用。正式 v3 的独立快照准备进行中，尚无正式模型结果。
 
 原 002 准备中途因远端适配器失败安全停止，已保存 34 项独立快照与逐试验预留；不覆盖、重置或丢弃其未知结果。v3 使用相同来源内容和仓库身份恢复未执行的准备，每个引用仍由适配器读回核验；矩阵、清单与配置另存为 `frozen-evaluation-003/`。本轮 Go 单元／vet、50 项 Python 合同均通过，新提交完整远端 CI 仍须完成。
+
+
+### 首项正式冒烟失败与预算规划修复
+
+用户授权临时提高每日模型请求上限后，单日上限曾设为 25,000，单 Issue 200 次／120 分钟、2 次尝试与 2 轮修复保持不变，实际配置摘要为 `102537ce7504ad4a825d94c5bbaf4cf18559bfab3c0f2d64455c7041bd13d2af`。正式 `smoke-T01`（Issue #6／PR #7）在 200 次请求后达到 BLOCKED，结果 `budget_exhausted`；可信 CI 和独立隐藏 Judge PASS、进程已确认停止，审查及 Skeptic 未完成。306 个证据文件与失败回执已保存于 `formal-evaluation-004/`，未计 PASS；后续 9 项冒烟、90 对照与 20 盲审按准入协议未运行。
+
+失败停稳后已恢复每日 500，并通过部署 API 核验；当时累计 655 次保持不变，恢复配置摘要 `7d9ee4342ea0113c63f24c6d988c66c7c2aeada79bc6967c284f47dabc4c084b`。记录和确认见 `live-runtime-001/temporary-budget-journal.json` 及 `restored-execution-config.json`。部分独立引用准备已安全停止，70 项准备及逐任务预留保留。
+
+事实审计找到 5 次开发规划、独立构建验证／DB 验证／验收分析造成重复开销，但没有每次 Agent 的 HTTP 请求计数，不能把工具证据数量当请求数。v4 提示与控制器输入明确实际验证命令，要求同范围实现测试合并、完成事件计划充分时返回空变更、审查分组并预留 Skeptic 额度；全部义务、独立首轮、启动检查、CI 和 Judge 不省略。专用配置显式映射 ISSUEDESK_TEST_DATABASE_URL 到隔离服务 TEST_DATABASE_URL，实际运行数据库公开测试。
+
+复验使用独立 `--experiment-id` 批次；trial_id、逻辑 run_key、回执、恢复与检查点显式区分，既有 trial／Issue／PR／失败／用量不能覆盖。评估版本 v4 只改可信协议摘要，基线、题面、变体、标签、CLI 与 driver／harness 摘要维持 v3 原值。旧数据继续独立保存。
+
+提交 `bdd189a` 的远端 run `38413122976` 两 job 成功：unit 366 passed、PostgreSQL 432、Docker 449，无未覆盖 skip，T01–T28 全通过。artifact `11825380524` 这次实际上传并下载验证：32 文件，ZIP SHA-256 `6f2316ddd1305df51d8d3c58930a6ef9c549ee56a0f8445f0f3ed8d6ead764e9`；控制台原日志 SHA-256 `840fc63ee6b55f70e77720495c004b42a67aba5b2358ee1a4b58df02c3334496`。这是 v3 代码验证，v4 修改的完整远端 CI 另行核验。

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -15,6 +16,53 @@ spec.loader.exec_module(evaluation)
 target_spec = importlib.util.spec_from_file_location("evaluation_target", ROOT / "scripts/pilot-eval-target.py")
 target_policy = importlib.util.module_from_spec(target_spec)
 target_spec.loader.exec_module(target_policy)
+
+EXPERIMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,23}$", re.ASCII)
+TRIAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$", re.ASCII)
+
+def checked_experiment_id(value):
+    if value is None or value == "":
+        return ""
+    if not EXPERIMENT_ID.fullmatch(value):
+        raise ValueError("experiment-id 必须是 1–24 位 ASCII 字母数字、点、下划线或连字符，并以字母数字开头")
+    return value
+
+def namespaced_trial_id(experiment_id, trial_id):
+    experiment_id = checked_experiment_id(experiment_id)
+    result = experiment_id + "." + trial_id if experiment_id else trial_id
+    if len(result) > 100 or not TRIAL_ID.fullmatch(result):
+        raise ValueError("试验 ID 超出评估 API 的安全长度或字符范围")
+    return result
+
+def build_trials(manifest, matrix, seed, experiment_id=""):
+    experiment_id = checked_experiment_id(experiment_id)
+    expected_runs = {
+        f"{task['id']}-{arm}-{repeat}": (task["id"], arm, repeat)
+        for task in manifest["tasks"] for arm in evaluation.PROFILES for repeat in range(1, 4)
+    }
+    runs = matrix.get("runs", [])
+    if len(runs) != 90 or {run.get("run_key") for run in runs} != set(expected_runs) or any(
+        (run.get("task_id"), run.get("arm"), run.get("repeat")) != expected_runs[run["run_key"]]
+        for run in runs
+    ):
+        raise ValueError("矩阵 run_key 与冻结任务、分组和重复次数映射不一致")
+    trials = [{"trial_id": "smoke-" + t["id"], "task_id": t["id"], "profile": "full", "kind": "smoke", "candidate_id": t["id"] + "-defect", "repeat": 1} for t in manifest["tasks"]]
+    trials += [{"trial_id": t["run_key"], "run_key": t["run_key"], "task_id": t["task_id"], "profile": evaluation.PROFILES[t["arm"]], "kind": "development", "candidate_id": t["task_id"] + "-defect", "repeat": t["repeat"]} for t in matrix["runs"]]
+    trials += [{"trial_id": "review-" + hashlib.sha256((str(seed) + ":" + c["candidate_id"]).encode()).hexdigest()[:20], "task_id": pair["pair_id"], "profile": "full", "kind": "review", "candidate_id": c["candidate_id"], "repeat": 1} for pair in manifest["review_pairs"] for c in pair["candidates"]]
+    for trial in trials:
+        trial["trial_id"] = namespaced_trial_id(experiment_id, trial["trial_id"])
+        trial["experiment_id"] = experiment_id
+    if len(trials) != 120 or len({x["trial_id"] for x in trials}) != 120:
+        raise ValueError("试验集合必须恰有 120 个独立 ID")
+    return trials
+
+def adapter_trial(trial):
+    """Keep the legacy unprefixed request shape stable for adapter reservations."""
+    result = dict(trial)
+    if not result.get("experiment_id"):
+        result.pop("experiment_id", None)
+        result.pop("run_key", None)
+    return result
 
 def go_json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").encode()
@@ -31,12 +79,12 @@ def call(adapter, payload):
 def validate_saved_identity(saved, expected):
     if not isinstance(saved, dict) or not isinstance(saved.get("trials"), list):
         raise ValueError("已保存准备回执格式无效")
-    if any(saved.get(key) != value for key, value in expected.items()):
+    if any(saved.get(key, "" if key == "experiment_id" else None) != value for key, value in expected.items()):
         raise ValueError("已保存准备回执绑定了不同的冻结计划或 GitHub 身份")
-    identity_keys = ("repository", "repository_id", "installation_id", "app_id")
+    identity_keys = ("repository", "repository_id", "installation_id", "app_id", "experiment_id")
     for trial in saved["trials"]:
-        if not isinstance(trial, dict) or any(trial.get(key) != expected[key] for key in identity_keys):
-            raise ValueError("已保存试验回执缺少匹配的 GitHub 身份，拒绝跨身份恢复")
+        if not isinstance(trial, dict) or any(trial.get(key, "" if key == "experiment_id" else None) != expected[key] for key in identity_keys):
+            raise ValueError("已保存试验回执缺少匹配的 GitHub 身份或评估批次，拒绝混合恢复")
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -44,6 +92,7 @@ def main():
         parser.add_argument("--" + name, required=True)
     for name in ("repository-id", "installation-id", "app-id", "seed"):
         parser.add_argument("--" + name, required=True, type=int)
+    parser.add_argument("--experiment-id", type=checked_experiment_id, help="可选批次前缀；省略时保留旧试验 ID")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     if not args.execute:
@@ -54,20 +103,20 @@ def main():
     if matrix["manifest_version"] != manifest["version"]:
         raise ValueError("矩阵清单版本不匹配")
     task_map = {t["id"]: t for t in manifest["tasks"]}
-    trials = [{"trial_id": "smoke-" + t["id"], "task_id": t["id"], "profile": "full", "kind": "smoke", "candidate_id": t["id"] + "-defect", "repeat": 1} for t in manifest["tasks"]]
-    trials += [{"trial_id": t["run_key"], "task_id": t["task_id"], "profile": evaluation.PROFILES[t["arm"]], "kind": "development", "candidate_id": t["task_id"] + "-defect", "repeat": t["repeat"]} for t in matrix["runs"]]
-    trials += [{"trial_id": "review-" + hashlib.sha256((str(args.seed) + ":" + c["candidate_id"]).encode()).hexdigest()[:20], "task_id": pair["pair_id"], "profile": "full", "kind": "review", "candidate_id": c["candidate_id"], "repeat": 1} for pair in manifest["review_pairs"] for c in pair["candidates"]]
-    if len(trials) != 120 or len({x["trial_id"] for x in trials}) != 120:
-        raise ValueError("试验集合必须恰有 120 个独立 ID")
+    experiment_id = checked_experiment_id(getattr(args, "experiment_id", None))
+    trials = build_trials(manifest, matrix, args.seed, experiment_id)
     out = Path(args.output).resolve()
     work = Path(args.workspace_root).resolve()
     if work == ROOT or ROOT in work.parents:
         raise ValueError("候选工作区必须在产品仓库之外")
     work.mkdir(parents=True, exist_ok=True)
     saved_identity = {"repository": args.repository, "repository_id": args.repository_id, "installation_id": args.installation_id, "app_id": args.app_id}
-    saved_pins = {**saved_identity, "manifest_digest": manifest_digest, "config_digest": matrix["config_sha256"], "seed": args.seed}
+    saved_pins = {**saved_identity, "manifest_digest": manifest_digest, "config_digest": matrix["config_sha256"], "seed": args.seed, "experiment_id": experiment_id}
     saved = evaluation.read(out) if out.exists() else {"trials": [], **saved_pins}
     validate_saved_identity(saved, saved_pins)
+    saved["experiment_id"] = experiment_id
+    for prior in saved["trials"]:
+        prior.setdefault("experiment_id", experiment_id)
     completed = {t["trial_id"] for t in saved["trials"]}
     adapter = Path(args.adapter).resolve(strict=True)
     for trial in trials:
@@ -84,7 +133,7 @@ def main():
         actual = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
         if actual != expected:
             raise ValueError("独立候选内容与冻结清单不一致：" + trial["trial_id"])
-        request = {"protocol": "pilot-eval-prepare/v1", "operation": "prepare_independent_trial", "repository": args.repository, "repository_id": args.repository_id, "installation_id": args.installation_id, "app_id": args.app_id, "trial": trial, "workspace": str(target), "source_sha256": expected, "source_files": hashes, "baseline_source_sha256": task["baseline_source_sha256"], "forbid_inheriting_prior_candidate": True, "require_existing_or_create_candidate_pr": trial["kind"] == "review", "idempotency_key": trial["trial_id"]}
+        request = {"protocol": "pilot-eval-prepare/v1", "operation": "prepare_independent_trial", "repository": args.repository, "repository_id": args.repository_id, "installation_id": args.installation_id, "app_id": args.app_id, "trial": adapter_trial(trial), "workspace": str(target), "source_sha256": expected, "source_files": hashes, "baseline_source_sha256": task["baseline_source_sha256"], "forbid_inheriting_prior_candidate": True, "require_existing_or_create_candidate_pr": trial["kind"] == "review", "idempotency_key": trial["trial_id"]}
         receipt = call(adapter, request)
         if receipt.get("repository_id") != args.repository_id or receipt.get("installation_id") != args.installation_id or receipt.get("app_id") != args.app_id or receipt.get("repository") != args.repository or receipt.get("source_sha256") != expected or receipt.get("independently_rebuilt") is not True:
             raise ValueError("适配器回执没有绑定实际仓库、安装与源码摘要")
