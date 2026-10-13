@@ -45,7 +45,7 @@ func TestPromptVersionAndBudgetEfficiencyBoundaries(t *testing.T) {
 	}{
 		{RoleTriage, []string{"批量提交彼此独立", "不得在工具批次中混入 submit_report", "依赖该批次其他调用结果"}},
 		{RoleDevPlanner, []string{"剩余请求预算", "合并同一修改范围的实现与测试为一个 Builder 任务", "仅为重复控制器已规定的 build/test 检查", "真实验收标准仍有未覆盖缺口", "不为保持活跃或重述验收而生成多余工作"}},
-		{RoleReviewPlanner, []string{"首轮审查、可能的证据补充及 Skeptic 复核开销", "为后两者预留请求额度", "同一到两个任务可覆盖彼此相关的多项义务", "不能把所有额度都排给首轮", "通过省略 Skeptic/义务制造虚假可行性"}},
+		{RoleReviewPlanner, []string{"首轮审查、可能的证据补充及 Skeptic 复核开销", "为后两者预留请求额度", "一到两个任务可覆盖彼此相关的多项义务", "不能把所有额度都排给首轮", "通过省略 Skeptic/义务制造虚假可行性"}},
 		{RoleReviewer, []string{"直接相关的差异和源码", "不要重复全仓扫描", "workflow_state 等控制器事实", "产品源码行为必须由你独立取得的源码或执行证据支持", "可信 CI 结果只能证明记录的检查是否运行/通过"}},
 		{RoleSkeptic, []string{"不得因预算紧张而省略已安排的 Skeptic 阶段", "减少强制义务"}},
 	}
