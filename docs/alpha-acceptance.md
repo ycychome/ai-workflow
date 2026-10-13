@@ -109,3 +109,14 @@
 真实探针 002 已取得固定 test-merge `71190131317bfddc8a72d4be1dd1e127b3813b29`、树 `3ec1e8ce79dd903a792d03c7b457690422223c45`。宿主 `ci-receipt` 对 Actions run `38406324523` attempt 1 独立测试、确认停止并签发成功，receipt digest `10ba35713ab2d5ce4a2d7c7c5d13afdd0bbfa604ee68aaa7cb4f73a83584d18b`；控制器实际进入 REVIEWING，未以 CLI 退出码代替最终审查或 Judge。
 
 真实证据导出发现 JSON 摘要表示不一致：存储文件为缩进 JSON，而 Evidence.Hash 绑定紧凑 JSON；API 旧实现错误地比较原文件字节。现改为保留原顺序、数值和转义的 `json.Compact` 后严格校验并返回紧凑字节，不改变历史摘要。回归覆盖大整数、中文／转义、篡改、路径和 symlink 越界。此传输修复通过 Go 单元／vet，运行器将在当前 Agent 停稳后更新，再进行真实证据 GET 与摘要核验。
+
+
+### v3 工具额度合同与失败留证
+
+探针 002 已在冻结 v2 判定包中完成实际外部 Judge：PASS、退出 0、stopped_confirmed=true；完整流程仍是 failed（185 次模型 HTTP 请求，Skeptic 调用了未注册 get_goal），未计正式冒烟。API 成功导出可信 CI 证据并核对紧凑 JSON 摘要，随后实际 `record_result` 保存 255 个证据文件及原始失败；结果位于 `live-runtime-001/connection-probe-002-results/`。原版本素材复制并逐项校验于 `frozen-evaluation-002/judge-original-v2/`，版本升级未重写这一结果。
+
+预算回归确认，普通工具批次个数与实际 HTTP 尝试是独立资源。现保持每 Issue 200／每日 500 个模型 HTTP 请求（含重试）、120 分钟、2 次尝试与 2 轮修复，只给每次 Agent run 的普通工具尝试使用独立有限上限 200；未知工具批次全部不执行，可在剩余 HTTP 预算内获得确定性纠正反馈。测试证明混合合法／未知批次没有副作用、持续未知在请求边界停止、批量合法工具不提前耗尽模型请求额度。模型可见字段明确区分 max_calls 与 max_requests。
+
+提示版本 `zh-CN/v3`、执行字段 `runner.max_tool_calls_per_run` 和可信 CLI／协议已显式纳入新清单 `issuedesk-alpha-v3-tool-budget`。清单摘要 `45ed27b4f62f5b2f594777c1415cccb541fc8b563e40b2f85dea415c5419d86f`；有效配置摘要 `7d9ee4342ea0113c63f24c6d988c66c7c2aeada79bc6967c284f47dabc4c084b`，来自实际 API，预算与控制器返回逐项相等。版本审计证明服务基线、题面、变体、20 个标签及外部 driver／harness 的字节与 SHA-256 全部不变；新旧矩阵不能混用。正式 v3 的独立快照准备进行中，尚无正式模型结果。
+
+原 002 准备中途因远端适配器失败安全停止，已保存 34 项独立快照与逐试验预留；不覆盖、重置或丢弃其未知结果。v3 使用相同来源内容和仓库身份恢复未执行的准备，每个引用仍由适配器读回核验；矩阵、清单与配置另存为 `frozen-evaluation-003/`。本轮 Go 单元／vet、50 项 Python 合同均通过，新提交完整远端 CI 仍须完成。

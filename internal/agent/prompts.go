@@ -61,7 +61,8 @@ type PromptVersions struct {
 	Snapshot string `json:"snapshot"`
 }
 
-// MaxCalls and MaxRequests are the remaining limits for this run, not workflow totals.
+// MaxCalls is the per-run ordinary tool invocation cap; MaxRequests is the
+// remaining charged model HTTP-attempt budget.
 type PromptBudget struct {
 	MaxCalls                  int    `json:"max_calls"`
 	MaxRequests               int    `json:"max_requests"`

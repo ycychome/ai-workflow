@@ -23,7 +23,7 @@ class OfflineEvaluationTests(unittest.TestCase):
 
     def config(self):
         # 数字仅为回归测试输入；生产矩阵必须读取运行器有效配置。
-        config = {"model_profile":"synthetic-test-profile","budget":{"issue_calls":7,"daily_calls":29,"issue_minutes":11,"max_attempts":2,"max_fix_rounds":2,"input_price_per_million":0,"output_price_per_million":0},"runner":{"attempt_minutes":3,"agent_concurrency":2,"workflow_agent_concurrency":2,"max_tasks_per_workflow":9,"max_evidence_requests":8}}
+        config = {"model_profile":"synthetic-test-profile","budget":{"issue_calls":7,"daily_calls":29,"issue_minutes":11,"max_attempts":2,"max_fix_rounds":2,"input_price_per_million":0,"output_price_per_million":0},"runner":{"attempt_minutes":3,"agent_concurrency":2,"workflow_agent_concurrency":2,"max_tasks_per_workflow":9,"max_evidence_requests":8,"max_tool_calls_per_run":200}}
         path = self.dir / "effective.json"
         path.write_text(json.dumps(config))
         return path,config

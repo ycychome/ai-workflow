@@ -39,7 +39,7 @@ Alpha 开发与验收应使用[隔离部署说明](docs/deployment-alpha.md)：�
 
 [评估协议](docs/alpha-fixture.md)定义十项真实冒烟、三配置 × 十题 × 三次的九十项同预算对照，以及二十个缺陷／修复候选。真实隐藏测试在独立可信副本中执行，Agent 工作区不包含判定素材；公开测试通过与流程判定不能代替隐藏测试真值。人工标签校核及最终人工合并分别记录。
 
-接续验收固定目标为个人私有仓库 `zymooll/ai-workflow-alpha-test`（repo ID `1416790756`），App installation `170932429` 仅选择该仓库。当前真实 PR #2 探针未通过集成验收；正式十项冒烟、九十次 A/B/C 对照、二十项盲审、人工标签与合并均待完成。旧组织仓库 `ycychome/test-repo-for-ai-test` 仅为历史目标。旧 `ycychome/ai-workflow-pilot` 的[重置工具](docs/pilot-reset.md)仍只作用于原目标，不迁移其历史重置授权。
+接续验收固定目标为个人私有仓库 `zymooll/ai-workflow-alpha-test`（repo ID `1416790756`），App installation `170932429` 仅选择该仓库。探针 001 与 002 的完整流程均未通过，002 的可信 CI／隐藏判定已通过；正式十项冒烟、九十次 A/B/C 对照、二十项盲审、人工标签与合并均待完成。旧组织仓库 `ycychome/test-repo-for-ai-test` 仅为历史目标。旧 `ycychome/ai-workflow-pilot` 的[重置工具](docs/pilot-reset.md)仍只作用于原目标，不迁移其历史重置授权。
 
 ## 文档
 

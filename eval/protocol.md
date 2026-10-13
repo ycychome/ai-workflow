@@ -1,6 +1,6 @@
 # 冻结工单评估协议
 
-评估版本为 `issuedesk-alpha-v2-external-judge`。同一个正确服务基线分别施加十种确定性变体，形成十道独立开发任务；每道任务重新建目录和独立 PostgreSQL 服务，不依赖其他题目的修改或数据。对应十对缺陷/修复候选可用于 Reviewer 独立判断，修复候选为同一冻结正确基线。所有标签初始 `human_review=pending`，正式报告必须由人工核准，不能把生成标签声称为已确认真值。
+评估版本为 `issuedesk-alpha-v3-tool-budget`。同一个正确服务基线分别施加十种确定性变体，形成十道独立开发任务；每道任务重新建目录和独立 PostgreSQL 服务，不依赖其他题目的修改或数据。对应十对缺陷/修复候选可用于 Reviewer 独立判断，修复候选为同一冻结正确基线。所有标签初始 `human_review=pending`，正式报告必须由人工核准，不能把生成标签声称为已确认真值。
 
 ## 实验分组
 
@@ -10,7 +10,11 @@
 
 每组每题重复三次，共九十次开发运行。模型配置、代码快照、题面、可用工具与每题总预算保持一致；不能给 C 每个 Agent 各一份完整预算。随机种子、模型供应方/版本、开始时间和实际调用量均由运行器留证。任务顺序应在运行器中按记录的随机种子打乱；本 CLI 输出的是稳定逻辑矩阵，不冒充已经随机执行。
 
-`matrix --execution-config` 接收运行器导出的**有效非敏感配置 JSON**：`model_profile`，`budget` 中的 `issue_calls/daily_calls/issue_minutes/max_attempts/max_fix_rounds/input_price_per_million/output_price_per_million`，`runner` 中的 `attempt_minutes/agent_concurrency/workflow_agent_concurrency/max_tasks_per_workflow/max_evidence_requests`。这些字段都必须显式提供，不从 example 配置猜预算。`max_fix_rounds=0` 是有效配置，表示不允许自动修复轮，仍允许完成同预算评估。价格为零表示未知，成本输出 null。有效预算硬限仍由运行器执行；离线汇总只检测已记录的调用量、墙钟量超限，不冒充调用前拦截。
+`matrix --execution-config` 接收运行器导出的**有效非敏感配置 JSON**：`model_profile`，`budget` 中的 `issue_calls/daily_calls/issue_minutes/max_attempts/max_fix_rounds/input_price_per_million/output_price_per_million`，`runner` 中的 `attempt_minutes/agent_concurrency/workflow_agent_concurrency/max_tasks_per_workflow/max_evidence_requests/max_tool_calls_per_run`。这些字段都必须显式提供，不从 example 配置猜预算。`max_fix_rounds=0` 是有效配置，表示不允许自动修复轮，仍允许完成同预算评估。价格为零表示未知，成本输出 null。有效预算硬限仍由运行器执行；离线汇总只检测已记录的调用量、墙钟量超限，不冒充调用前拦截。
+
+`issue_calls` 与 `daily_calls` 限制实际模型 HTTP 请求尝试，包含传输重试，跨所有 Agent 共享；`max_tool_calls_per_run=200` 单独限制每次 Agent run 的普通工具调用尝试，包含被拒绝的未知工具批次。`max_calls` 与 `max_requests` 分别向模型呈现这两个轴。未知工具不会执行；修正反馈继续消耗原有 HTTP 请求额度，耗尽时停止。
+
+v3 仅更新这一执行与矩阵合同及可信 CLI／协议摘要。v2 的失败探针和原始判定包保留；服务基线、题面、确定性变体、候选标签、隐藏 driver／harness 与真值断言保持原 SHA-256，不以协议更新覆盖失败记录。
 
 ## 准备与隔离
 

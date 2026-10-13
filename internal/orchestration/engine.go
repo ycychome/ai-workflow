@@ -481,7 +481,7 @@ func (e *Engine) ask(ctx context.Context, w domain.Workflow, role agent.RoleID, 
 	if runtime >= int64(cfg.Budget.IssueMinutes)*60 {
 		return nil, errors.New("工作流累计执行时间额度已耗尽")
 	}
-	promptContext.Budget = agent.PromptBudget{MaxCalls: remaining, MaxRequests: remaining, RemainingTokens: int64(remaining) * int64(cfg.Model.MaxOutputTokens), TokenBudgetKind: "剩余调用的最大输出 token 估计上界；实际调用、时长和当日额度由控制器另行限制", DailyRemainingRequests: daily, IssueRemainingSeconds: max(0, int64(cfg.Budget.IssueMinutes*60)-runtime), RemainingTasks: max(0, cfg.EffectiveMaxTasksPerWorkflow()-current.TasksCreated), RemainingEvidenceRequests: max(0, cfg.EffectiveMaxEvidenceRequests()-len(current.EvidenceRequests))}
+	promptContext.Budget = agent.PromptBudget{MaxCalls: agent.MaxToolCallsPerRun, MaxRequests: remaining, RemainingTokens: int64(remaining) * int64(cfg.Model.MaxOutputTokens), TokenBudgetKind: "max_calls 是普通工具调用上限；max_requests 是剩余模型 HTTP 请求（含重试）额度。remaining_tokens 仅为剩余模型请求的最大输出 token 估计上界；实际时长与共享当日额度由控制器另行限制", DailyRemainingRequests: daily, IssueRemainingSeconds: max(0, int64(cfg.Budget.IssueMinutes*60)-runtime), RemainingTasks: max(0, cfg.EffectiveMaxTasksPerWorkflow()-current.TasksCreated), RemainingEvidenceRequests: max(0, cfg.EffectiveMaxEvidenceRequests()-len(current.EvidenceRequests))}
 	runs, err := e.Store.ListAgentRuns(ctx, w.ID)
 	if err != nil {
 		return nil, err
@@ -529,7 +529,7 @@ func (e *Engine) ask(ctx context.Context, w domain.Workflow, role agent.RoleID, 
 		}
 		return nil
 	}
-	res, err := runner.Run(ctx, agent.Request{Role: role, PromptVersion: agent.PromptVersion, System: system, Input: raw(input), Model: model, Tools: tools, ReportSchema: schema, MaxCalls: remaining, MaxRequests: remaining, ValidateReport: validate, BeforeRequest: func(c context.Context) error {
+	res, err := runner.Run(ctx, agent.Request{Role: role, PromptVersion: agent.PromptVersion, System: system, Input: raw(input), Model: model, Tools: tools, ReportSchema: schema, MaxCalls: agent.MaxToolCallsPerRun, MaxRequests: remaining, ValidateReport: validate, BeforeRequest: func(c context.Context) error {
 		if err := execution.check(c); err != nil {
 			return err
 		}

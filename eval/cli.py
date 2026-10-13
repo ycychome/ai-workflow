@@ -107,7 +107,7 @@ def matrix(args):
     # 只接受运行器导出的非敏感有效配置；不读取产品 YAML 或环境凭证。
     raw = load(args.execution_config)
     budget_keys = ("issue_calls","daily_calls","issue_minutes","max_attempts","max_fix_rounds","input_price_per_million","output_price_per_million")
-    runner_keys = ("attempt_minutes","agent_concurrency","workflow_agent_concurrency","max_tasks_per_workflow","max_evidence_requests")
+    runner_keys = ("attempt_minutes","agent_concurrency","workflow_agent_concurrency","max_tasks_per_workflow","max_evidence_requests","max_tool_calls_per_run")
     config = {"budget":{},"runner":{},"model_profile":raw.get("model_profile")}
     if not isinstance(config["model_profile"],str) or not config["model_profile"]:
         raise ValueError("必须提供固定且不含凭证的 model_profile 标识")

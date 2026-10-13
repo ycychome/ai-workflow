@@ -17,7 +17,7 @@ const (
 	RoleSkeptic       RoleID     = "skeptic"
 	ModelClassDev     ModelClass = "dev"
 	ModelClassReview  ModelClass = "review"
-	PromptVersion                = "zh-CN/v2"
+	PromptVersion                = "zh-CN/v3"
 )
 
 type RoleDefinition struct {

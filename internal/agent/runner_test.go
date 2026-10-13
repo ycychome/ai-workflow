@@ -266,3 +266,110 @@ func TestMaxRequestsStopsAfterConfiguredResponses(t *testing.T) {
 		t.Fatalf("err=%v requests=%d toolCalls=%d; run must stop before tools when no request remains", err, requests, toolCalls)
 	}
 }
+
+func TestToolCallCapIsIndependentFromRemainingHTTPRequests(t *testing.T) {
+	var requests, hooks, calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			var output strings.Builder
+			output.WriteString(`{"id":"resp-1","status":"completed","output":[`)
+			for i := 0; i < 6; i++ {
+				if i > 0 {
+					output.WriteByte(',')
+				}
+				fmt.Fprintf(&output, `{"type":"function_call","id":"fc_%d","call_id":"call_%d","name":"lookup","arguments":"{}"}`, i, i)
+			}
+			output.WriteString(`]}`)
+			_, _ = fmt.Fprintln(w, output.String())
+			return
+		}
+		_, _ = fmt.Fprintln(w, `{"id":"resp-2","status":"completed","output":[{"type":"function_call","id":"fc_report","call_id":"report","name":"submit_report","arguments":"{\"ok\":true}"}]}`)
+	}))
+	defer server.Close()
+	runner, err := NewRunner(Config{BaseURL: server.URL, Token: "token", Model: "model", MaxOutputTokens: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.Run(context.Background(), Request{
+		Input: json.RawMessage(`"do six lookups"`), MaxCalls: 6, MaxRequests: 3,
+		BeforeRequest: func(context.Context) error { hooks++; return nil },
+		Tools:         []Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`), Handler: func(context.Context, string, json.RawMessage) (string, error) { calls++; return `{"ok":true}`, nil }}},
+		ReportSchema:  json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || hooks != 2 || calls != 6 || result.Requests != 2 || result.Calls != 6 || string(result.Report) != `{"ok":true}` {
+		t.Fatalf("requests=%d hooks=%d calls=%d result=%+v", requests, hooks, calls, result)
+	}
+}
+
+func TestUnknownToolBatchIsRejectedAtomicallyAndCanBeCorrected(t *testing.T) {
+	var requests, hooks, validHandlerCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = fmt.Fprintln(w, `{"id":"resp-1","status":"completed","output":[{"type":"function_call","id":"fc_ok","call_id":"ok","name":"lookup","arguments":"{}"},{"type":"function_call","id":"fc_bad","call_id":"bad","name":"get_goal","arguments":"{}"}]}`)
+			return
+		}
+		var body struct {
+			Input []json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		joined, _ := json.Marshal(body.Input)
+		for _, fragment := range []string{`工具批次包含未注册工具，整批均未执行`, `get_goal`, `"call_id":"ok"`, `"call_id":"bad"`} {
+			if !strings.Contains(string(joined), fragment) {
+				t.Fatalf("correction request omitted %q: %s", fragment, joined)
+			}
+		}
+		if requests == 2 {
+			_, _ = fmt.Fprintln(w, `{"id":"resp-2","status":"completed","output":[{"type":"function_call","id":"fc_fixed","call_id":"fixed","name":"lookup","arguments":"{}"}]}`)
+			return
+		}
+		_, _ = fmt.Fprintln(w, `{"id":"resp-3","status":"completed","output":[{"type":"function_call","id":"fc_report","call_id":"report","name":"submit_report","arguments":"{\"ok\":true}"}]}`)
+	}))
+	defer server.Close()
+	runner, err := NewRunner(Config{BaseURL: server.URL, Token: "token", Model: "model", MaxOutputTokens: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.Run(context.Background(), Request{
+		Input: json.RawMessage(`"correct tool names"`), MaxCalls: 4, MaxRequests: 3,
+		BeforeRequest: func(context.Context) error { hooks++; return nil },
+		Tools: []Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`), Handler: func(context.Context, string, json.RawMessage) (string, error) {
+			validHandlerCalls++
+			return `{"ok":true}`, nil
+		}}},
+		ReportSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 || hooks != 3 || validHandlerCalls != 1 || result.Requests != 3 || result.Calls != 1 || string(result.Report) != `{"ok":true}` {
+		t.Fatalf("requests=%d hooks=%d handler calls=%d result=%+v", requests, hooks, validHandlerCalls, result)
+	}
+}
+
+func TestPersistentUnknownToolIsBoundedAndCharged(t *testing.T) {
+	var requests, hooks, calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = fmt.Fprintf(w, `{"id":"resp-%d","status":"completed","output":[{"type":"function_call","id":"fc_%d","call_id":"bad-%d","name":"get_goal","arguments":"{}"}]}`+"\n", requests, requests, requests)
+	}))
+	defer server.Close()
+	runner, err := NewRunner(Config{BaseURL: server.URL, Token: "token", Model: "model", MaxOutputTokens: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.Run(context.Background(), Request{
+		Input: json.RawMessage(`"try"`), MaxCalls: 10, MaxRequests: 3,
+		BeforeRequest: func(context.Context) error { hooks++; return nil },
+		Tools:         []Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`), Handler: func(context.Context, string, json.RawMessage) (string, error) { calls++; return "", nil }}},
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown tool "get_goal"`) || !strings.Contains(err.Error(), "request limit exhausted") || requests != 3 || hooks != 3 || calls != 0 {
+		t.Fatalf("err=%v requests=%d hooks=%d calls=%d", err, requests, hooks, calls)
+	}
+}

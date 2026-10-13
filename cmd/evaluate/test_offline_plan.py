@@ -21,7 +21,7 @@ class OfflinePlanTests(unittest.TestCase):
     def test_resume_rejects_unpinned_or_mixed_identity_before_adapter(self):
         with tempfile.TemporaryDirectory(prefix="aiwf-resume-identity-") as directory:
             root=Path(directory)
-            cfg={"model_profile":"offline-test-only","budget":{"issue_calls":80,"daily_calls":500,"issue_minutes":120,"max_attempts":2,"max_fix_rounds":2,"input_price_per_million":0,"output_price_per_million":0},"runner":{"attempt_minutes":30,"agent_concurrency":8,"workflow_agent_concurrency":3,"max_tasks_per_workflow":64,"max_evidence_requests":64}}
+            cfg={"model_profile":"offline-test-only","budget":{"issue_calls":80,"daily_calls":500,"issue_minutes":120,"max_attempts":2,"max_fix_rounds":2,"input_price_per_million":0,"output_price_per_million":0},"runner":{"attempt_minutes":30,"agent_concurrency":8,"workflow_agent_concurrency":3,"max_tasks_per_workflow":64,"max_evidence_requests":64,"max_tool_calls_per_run":200}}
             (root/"config.json").write_text(json.dumps(cfg))
             subprocess.run([sys.executable,str(ROOT/"eval/cli.py"),"matrix","--execution-config",str(root/"config.json"),"--output",str(root/"matrix.json")],check=True,stdout=subprocess.DEVNULL)
             matrix=json.loads((root/"matrix.json").read_text())
@@ -40,7 +40,7 @@ class OfflinePlanTests(unittest.TestCase):
     def test_prepare_120_independent_snapshots_and_blind_plan(self):
         with tempfile.TemporaryDirectory(prefix="aiwf-offline-plan-") as directory:
             root=Path(directory)
-            cfg={"model_profile":"offline-test-only","budget":{"issue_calls":80,"daily_calls":500,"issue_minutes":120,"max_attempts":2,"max_fix_rounds":2,"input_price_per_million":0,"output_price_per_million":0},"runner":{"attempt_minutes":30,"agent_concurrency":8,"workflow_agent_concurrency":3,"max_tasks_per_workflow":64,"max_evidence_requests":64}}
+            cfg={"model_profile":"offline-test-only","budget":{"issue_calls":80,"daily_calls":500,"issue_minutes":120,"max_attempts":2,"max_fix_rounds":2,"input_price_per_million":0,"output_price_per_million":0},"runner":{"attempt_minutes":30,"agent_concurrency":8,"workflow_agent_concurrency":3,"max_tasks_per_workflow":64,"max_evidence_requests":64,"max_tool_calls_per_run":200}}
             (root/"config.json").write_text(json.dumps(cfg))
             subprocess.run([sys.executable,str(ROOT/"eval/cli.py"),"matrix","--execution-config",str(root/"config.json"),"--output",str(root/"matrix.json")],check=True,stdout=subprocess.DEVNULL)
             calls=[]

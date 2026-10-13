@@ -1,5 +1,5 @@
 {
-  "version": "issuedesk-alpha-v2-external-judge",
+  "version": "issuedesk-alpha-v3-tool-budget",
   "language": "zh-CN",
   "source_provenance": "本项目独立编写的合成工单服务，不含真实客户数据",
   "baseline_files": {
@@ -23,8 +23,8 @@
   "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
   "trusted_files": {
     "variants.json": "cd342a7375d346a343c86cdc77da4b1aa25ae0bd29f87d8f712ae4b396f7beee",
-    "cli.py": "081d3e0b07e30a6f7b2db4a483fda5125e754ac11deb967a204bbbc267a5e8b5",
-    "protocol.md": "e6c1e511f269b4caf9c3eb48afed15768c231c8af360ad71995acbde91182565",
+    "cli.py": "f046a6bd018c30a2f90fbfd7eb481dce952c9c747a2a6893bc7824adf0defe25",
+    "protocol.md": "81581e9f4f7f95aff0215eddb4794dc32b721a1224823efc0c1aa9c4401bcbe5",
     "trusted/driver/main.go.txt": "81789f3582185cfd5d2247184a789c59b697cb2ea13a005dc5cd08fd5d5d1b67",
     "trusted/harness/go.mod": "b4f6da7af94ca7ea2542e24f08b7c68028ce6eb7a262b2e83c74561d69618237",
     "trusted/harness/go.sum": "993e50f19ae391c6074b7aaa60ff36559a5330f7363bd380e96da68f5ab02f4a",
