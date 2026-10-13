@@ -997,10 +997,10 @@
   }
 
   function forceAcceptanceKind(w) {
-    if (isStoppedOrOwned(w)) return "";
+    if (isStoppedOrOwned(w) && w.control !== "CANCELLED") return "";
     if (w.pr && !w.merged && !["closed", "merged"].includes(String(w.pr_state || "").toLowerCase()) &&
         ["VERIFYING", "REVIEWING", "CHANGES_REQUESTED", "BLOCKED", "AWAITING_MAINTAINER"].includes(w.phase)) return "pr_merge_gate";
-    if (!w.pr && ["INTAKE", "TRIAGE", "NEEDS_INFO", "SPEC_READY", "PLANNING"].includes(w.phase)) return "issue_development";
+    if (!w.pr && ["INTAKE", "TRIAGE", "NEEDS_INFO", "SPEC_READY", "DEFERRED", "REJECT_PROPOSED", "REJECTED", "BLOCKED"].includes(w.phase)) return "issue_development";
     return "";
   }
 
@@ -1185,7 +1185,7 @@
       const message = kind === "pr_merge_gate"
         ? `将对 ${target} 记录一次人工强制放行，跳过本系统的自动审查门禁。GitHub 其他必需检查仍适用；这不会自动合并，仍需维护者在 GitHub 实际合并。确认继续？`
         : `将对 ${target} 强制进入开发，绕过需求 / 规格自动审批。此操作会记录操作者和被跳过的检查。确认继续？`;
-      if (!window.confirm(message)) return;
+      if (!window.confirm((workflow.control === "CANCELLED" ? "此操作会恢复已取消的工作流。\n\n" : "") + message)) return;
       apiCommand = kind === "pr_merge_gate" ? "forceaccept merge" : "forceaccept dev";
       payload.command = apiCommand;
       payload.expected_generation = workflow.generation;

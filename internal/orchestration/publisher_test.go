@@ -107,4 +107,10 @@ func TestAcceptNeedsValidProposalAndAnalyzeIsNotAcceptance(t *testing.T) {
 	if forceIssueStage(domain.Workflow{Phase: "INTAKE", Control: "HUMAN_OWNED"}) {
 		t.Fatal("forceaccept must not override human-owned control")
 	}
+	if !forceIssueStage(domain.Workflow{Phase: "NEEDS_INFO", Control: "CANCELLED"}) {
+		t.Fatal("explicit maintainer forceaccept should be able to restore a settled cancellation")
+	}
+	if forceIssueStage(domain.Workflow{Phase: "NEEDS_INFO", Control: "CANCELLING"}) {
+		t.Fatal("forceaccept must wait for an in-progress cancellation to settle")
+	}
 }

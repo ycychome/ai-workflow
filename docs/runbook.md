@@ -141,7 +141,9 @@ A Maintainer may issue `/ai forceaccept` (also available in the workflow Web
 actions) to force an Issue into development planning or to allow its current PR
 through this system's merge gate. The forced decision is attributed and tied to
 the current candidate identity; verification and review evidence remain truthful.
-It does not merge the PR or alter GitHub's other required checks. Changing the
+An explicit forceaccept may restore a settled cancellation; it waits for any
+in-progress stop or external write to settle. Ordinary replies do not restore
+cancelled work. It does not merge the PR or alter GitHub's other required checks. Changing the
 base, head, specification or policy invalidates the current forced approval.
 
 ## Backup, restore, and shutdown

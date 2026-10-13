@@ -707,8 +707,12 @@ func (e *Engine) analyze(ctx context.Context, w domain.Workflow, actor string) e
 	})
 }
 
+func forceControlAllowed(w domain.Workflow) bool {
+	return w.Control == "ACTIVE" || w.Control == "PAUSED" || w.Control == "CANCELLED"
+}
+
 func forceIssueStage(w domain.Workflow) bool {
-	if w.Control != "ACTIVE" && w.Control != "PAUSED" {
+	if !forceControlAllowed(w) {
 		return false
 	}
 	switch w.Phase {
@@ -828,8 +832,8 @@ func (e *Engine) forceAcceptIssue(ctx context.Context, w domain.Workflow, actor 
 }
 
 func (e *Engine) forceAcceptPR(ctx context.Context, w domain.Workflow, actor string) error {
-	if w.Control != "ACTIVE" && w.Control != "PAUSED" {
-		return errors.New("forceaccept cannot override cancellation, takeover, or completed control")
+	if !forceControlAllowed(w) {
+		return errors.New("forceaccept cannot override an in-progress stop, takeover, or completed control")
 	}
 	switch w.Phase {
 	case "VERIFYING", "REVIEWING", "CHANGES_REQUESTED", "BLOCKED", "AWAITING_MAINTAINER":
@@ -845,7 +849,7 @@ func (e *Engine) forceAcceptPR(ctx context.Context, w domain.Workflow, actor str
 			return err
 		}
 		w = refreshed
-		if w.Control != "ACTIVE" && w.Control != "PAUSED" {
+		if !forceControlAllowed(w) {
 			return errors.New("workflow control changed during PR reconciliation")
 		}
 		switch w.Phase {
@@ -885,7 +889,7 @@ func (e *Engine) forceAcceptPR(ctx context.Context, w domain.Workflow, actor str
 	now := time.Now().UTC()
 	bypassed := []string{"automated verification", "reviewer analysis", "skeptic review", "automatic merge-gate criteria"}
 	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
-		if x.Version != w.Version || x.Generation != w.Generation || x.PR != w.PR || x.HeadSHA != w.HeadSHA || x.BaseSHA != w.BaseSHA || x.Control == "HUMAN_OWNED" || x.Control == "CANCELLING" || x.Control == "CANCELLED" || x.Control == "COMPLETED" {
+		if x.Version != w.Version || x.Generation != w.Generation || x.PR != w.PR || x.HeadSHA != w.HeadSHA || x.BaseSHA != w.BaseSHA || x.Control == "HUMAN_OWNED" || x.Control == "CANCELLING" || x.Control == "COMPLETED" {
 			return nil, errors.New("PR identity or control changed before forceaccept")
 		}
 		x.Generation++

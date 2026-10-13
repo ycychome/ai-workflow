@@ -84,7 +84,7 @@ func TestForceCommandsPostgresIntegration(t *testing.T) {
 	}
 
 	// Force development preserves the complete source request and existing constraints.
-	dev := domain.Workflow{ID: domain.ID(991337, 2), RepositoryID: 991337, Repository: "local/pilot", Issue: 2, IssueTitle: "unreviewed request", IssueBody: "line one\nline two\nall requested details", Phase: "TRIAGE", Control: "ACTIVE", Discussion: []string{"prior answer"}, Spec: domain.Spec{Revision: 2, Criteria: []domain.Criterion{{ID: "OLD", Description: "preserve this constraint"}}}}
+	dev := domain.Workflow{ID: domain.ID(991337, 2), RepositoryID: 991337, Repository: "local/pilot", Issue: 2, IssueTitle: "unreviewed request", IssueBody: "line one\nline two\nall requested details", Phase: "NEEDS_INFO", Control: "CANCELLED", Discussion: []string{"prior answer"}, Spec: domain.Spec{Revision: 2, Criteria: []domain.Criterion{{ID: "OLD", Description: "preserve this constraint"}}}}
 	if err := s.Create(ctx, dev); err != nil {
 		t.Fatalf("create development fixture: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestForceCommandsPostgresIntegration(t *testing.T) {
 	// Force merge approval remains a manual override: the normal domain gate
 	// stays false, while the gate outbox record explicitly carries the override.
 	finding := domain.Finding{ID: "F-1", Severity: "high", Description: "unresolved fixture finding", State: "OPEN"}
-	pr := domain.Workflow{ID: domain.ID(991337, 3), RepositoryID: 991337, Repository: "local/pilot", Issue: 3, IssueTitle: "PR fixture", IssueBody: "request", Phase: "BLOCKED", Control: "ACTIVE", PR: 33, BaseSHA: "base-sha", HeadSHA: "head-sha", Spec: domain.Spec{Title: "fixture", Description: "fixture spec", Criteria: []domain.Criterion{{ID: "AC1", Description: "verified"}}, Approved: true, ApprovedBy: "maintainer"}, Review: domain.Review{VerificationPassed: false, SkepticComplete: false, Verdict: "BLOCKED", Obligations: []domain.Obligation{{ID: "O1", CriterionID: "AC1", Result: "unverified"}}, Findings: []domain.Finding{finding}}}
+	pr := domain.Workflow{ID: domain.ID(991337, 3), RepositoryID: 991337, Repository: "local/pilot", Issue: 3, IssueTitle: "PR fixture", IssueBody: "request", Phase: "BLOCKED", Control: "CANCELLED", PR: 33, BaseSHA: "base-sha", HeadSHA: "head-sha", Spec: domain.Spec{Title: "fixture", Description: "fixture spec", Criteria: []domain.Criterion{{ID: "AC1", Description: "verified"}}, Approved: true, ApprovedBy: "maintainer"}, Review: domain.Review{VerificationPassed: false, SkepticComplete: false, Verdict: "BLOCKED", Obligations: []domain.Obligation{{ID: "O1", CriterionID: "AC1", Result: "unverified"}}, Findings: []domain.Finding{finding}}}
 	pr.Spec.Digest = domain.SpecDigest(pr.Spec)
 	if err := s.Create(ctx, pr); err != nil {
 		t.Fatalf("create PR fixture: %v", err)
