@@ -138,6 +138,7 @@ func (e *Engine) client(ctx context.Context, w domain.Workflow) (*gh.Installatio
 func (e *Engine) Run(ctx context.Context) {
 	go e.inboxLoop(ctx)
 	go e.outboxLoop(ctx)
+	go e.labelLoop(ctx)
 	go e.reconcileLoop(ctx)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

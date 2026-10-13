@@ -96,6 +96,24 @@ tunnel process restarts; update the GitHub App webhook URL after each change.
 For a fixed-domain server deployment, configure that domain as the public URL
 and set the App webhook endpoint to `https://<domain>/webhooks/github`.
 
+## GitHub state labels
+
+The service reserves the `ai-workflow:` label prefix. It synchronizes a current
+phase label on the source Issue and its PR, such as `ai-workflow:需求分析`,
+`ai-workflow:开发中`, `ai-workflow:审查中`, or `ai-workflow:待维护者合并`.
+Paused, cancelled, human-owned and completed workflows also receive a control
+label (for example `ai-workflow:已取消`). Active workflows do not get a
+“running” label merely because they are eligible to run.
+
+State changes queue label updates transactionally. A separate retrying worker
+reads the latest state and replaces only labels under this reserved prefix;
+other repository labels are preserved. Labels are informational and do not
+change approval or merge rules. Startup and five-minute reconciliation backfill
+all existing GitHub workflows, including cancelled and merged ones, and restore
+removed labels. The App needs Issues write access (also used for PR labels).
+Label retries do not consume automatic workflow capacity or block publication
+and gate actions. Errors and receipts appear as `labels` outbox events.
+
 ## Control and merge
 
 Use the dashboard to inspect workflow phase, control state, event audit, task

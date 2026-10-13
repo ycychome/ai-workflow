@@ -176,6 +176,9 @@ func (s *Store) CreateIfAbsent(ctx context.Context, w domain.Workflow) (bool, er
 	if e != nil {
 		return false, e
 	}
+	if e = queueLabelSync(ctx, tx, w); e != nil {
+		return false, e
+	}
 	if e = tx.Commit(ctx); e != nil {
 		return false, e
 	}
@@ -350,6 +353,9 @@ func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action)
 			return e
 		}
 	}
+	if e = queueLabelSync(ctx, tx, *w); e != nil {
+		return e
+	}
 	if e = insertActions(ctx, tx, actions); e != nil {
 		return e
 	}
@@ -405,6 +411,9 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 		return err
 	}
 	if err = obsoleteUnstartedActions(ctx, tx, id, oldGeneration, oldControl, w.Generation, w.Control); err != nil {
+		return err
+	}
+	if err = queueLabelSync(ctx, tx, w); err != nil {
 		return err
 	}
 	if err = insertActions(ctx, tx, actions); err != nil {
@@ -644,11 +653,11 @@ func (s *Store) ClaimAction(ctx context.Context) (Action, error) {
 	var a Action
 	err := s.DB.QueryRow(ctx, `WITH next AS (
   SELECT o.id FROM outbox o
-  WHERE o.state IN ('pending','retry_wait','unknown','running')
+  WHERE o.kind<>'labels' AND o.state IN ('pending','retry_wait','unknown','running')
     AND o.next_attempt<=now() AND (o.lease_until IS NULL OR o.lease_until<now())
     AND NOT EXISTS (
       SELECT 1 FROM outbox earlier
-      WHERE earlier.workflow_id=o.workflow_id
+      WHERE earlier.workflow_id=o.workflow_id AND earlier.kind<>'labels'
         AND (earlier.created_at<o.created_at OR (earlier.created_at=o.created_at AND earlier.id<o.id))
         AND earlier.state IN ('pending','retry_wait','unknown','running')
     )
