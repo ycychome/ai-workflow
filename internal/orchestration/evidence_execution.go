@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,10 +20,77 @@ type evidenceProposal struct {
 	FindingID string `json:"finding_id"`
 }
 
+type evidenceFindingOption struct {
+	ID          string `json:"id"`
+	Severity    string `json:"severity"`
+	State       string `json:"state"`
+	Description string `json:"description"`
+}
+
+func evidenceFindingOptions(w domain.Workflow) []evidenceFindingOption {
+	options := make([]evidenceFindingOption, 0, len(w.Review.Findings))
+	if w.Review.Key == "" {
+		return options
+	}
+	for _, finding := range w.Review.Findings {
+		if finding.ID == "" || finding.VerificationKey != w.Review.Key {
+			continue
+		}
+		description := strings.TrimSpace(finding.Description)
+		if len([]rune(description)) > 240 {
+			description = string([]rune(description)[:240])
+		}
+		options = append(options, evidenceFindingOption{ID: finding.ID, Severity: finding.Severity, State: finding.State, Description: description})
+	}
+	sort.Slice(options, func(i, j int) bool { return options[i].ID < options[j].ID })
+	return options
+}
+
 func evidenceProposalSchema() map[string]any {
 	return object(map[string]any{"role": map[string]any{"type": "string", "enum": []string{"verifier", "reviewer"}}, "question": str(), "finding_id": str()})
 }
+
+// validateEvidenceProposals is a pure preflight for the complete batch. The
+// transactional checks in RequestEvidence remain authoritative when each
+// request is persisted.
+func validateEvidenceProposals(w domain.Workflow, proposals []evidenceProposal) error {
+	allowed := map[string]bool{}
+	ids := make([]string, 0, len(w.Review.Findings))
+	if w.Review.Key != "" {
+		for _, finding := range w.Review.Findings {
+			if finding.ID == "" || finding.VerificationKey != w.Review.Key {
+				continue
+			}
+			allowed[finding.ID] = true
+			ids = append(ids, finding.ID)
+		}
+	}
+	sort.Strings(ids)
+	for i, proposal := range proposals {
+		if err := validateEvidenceProposalFields(proposal); err != nil {
+			return fmt.Errorf("补充证据请求 %d：%w", i+1, err)
+		}
+		if proposal.FindingID != "" && !allowed[proposal.FindingID] {
+			return fmt.Errorf("补充证据请求 %d 引用了未知或过期发现 %q；当前验证身份可关联的发现：%s", i+1, proposal.FindingID, strings.Join(ids, ", "))
+		}
+	}
+	return nil
+}
+
+func validateEvidenceProposalFields(proposal evidenceProposal) error {
+	if proposal.Role != "verifier" && proposal.Role != "reviewer" {
+		return errors.New("补充证据只能交由 verifier 或 reviewer 执行")
+	}
+	if strings.TrimSpace(proposal.Question) == "" {
+		return errors.New("补充证据请求必须说明具体问题")
+	}
+	return nil
+}
+
 func (e *Engine) acceptEvidenceProposals(ctx context.Context, w *domain.Workflow, runID string, proposals []evidenceProposal) error {
+	if err := validateEvidenceProposals(*w, proposals); err != nil {
+		return err
+	}
 	for _, proposal := range proposals {
 		if _, err := e.RequestEvidence(ctx, w.ID, w.Review.Key, runID, proposal.Role, proposal.Question, proposal.FindingID); err != nil {
 			return err
