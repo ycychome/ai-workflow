@@ -965,13 +965,14 @@
 
   function flowStateNote(w) {
     const control = { PAUSED: "该工作流已暂停。", PAUSING: "该工作流正在暂停。", BLOCKED: "该工作流受阻，未完成步骤保持待执行或受阻状态。", CANCELLING: "该工作流正在取消。", CANCELLED: "该工作流已取消，后续步骤没有被标记为完成。", HUMAN_OWNED: "该工作流由维护者接管。" }[w.control];
-    const phase = { NEEDS_INFO: "当前等待需求补充；收到回复后可回到需求确认。", DEFERRED: "该请求已暂缓，未批准的后续步骤仍为待执行。", REJECTED: "该请求已被拒绝，后续步骤保持待执行。", REJECT_PROPOSED: "拒绝或延期建议等待维护者覆核。", CHANGES_REQUESTED: "验证或审查要求修改；图中显示修复回路。", BLOCKED: "工作流受阻；图中未完成的步骤不会被标为成功。" }[w.phase];
+    const phase = w.control === "ACTIVE" ? { NEEDS_INFO: "当前等待需求补充；收到回复后可回到需求确认。", DEFERRED: "该请求已暂缓，未批准的后续步骤仍为待执行。", REJECTED: "该请求已被拒绝，后续步骤保持待执行。", REJECT_PROPOSED: "拒绝或延期建议等待维护者覆核。", CHANGES_REQUESTED: "验证或审查要求修改；图中显示修复回路。", BLOCKED: "工作流受阻；图中未完成的步骤不会被标为成功。" }[w.phase] : "";
     const gateCurrent = w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase();
     const review = w.review?.verdict === "OBSOLETE" ? "当前 Reviewer / Skeptic 结果已过期，显示为历史并待重审。" : "";
     const gate = w.check_sha && !gateCurrent
       ? "当前门禁对应旧提交，当前 head 尚未确认。"
-      : "门禁只有在当前 head 的远端 Check Run 成功、当前审查为 PASS、可信验证与 Skeptic 均完成且处于 READY / 待维护者合并时才显示成功。";
-    return [control, phase, review, gate].filter(Boolean).join(" ");
+      : "自动门禁只有在当前 head 的远端 Check Run 成功、当前审查为 PASS、可信验证与 Skeptic 均完成且处于 READY / 待维护者合并时才显示成功。";
+    const forced = w.force_approval?.kind === "pr_merge_gate" && w.force_approval_current === true ? "当前版本已由维护者强制放行；人工决定单独记录，验证和审查结果保留。" : "";
+    return [control, phase, review, forced, gate].filter(Boolean).join(" ");
   }
 
   function isStoppedOrOwned(w) {
@@ -1180,7 +1181,7 @@
         showToast("工作流阶段已变化，请刷新后重新确认。", true);
         return;
       }
-      const target = `${text(workflow.repository)} ${workflow.pr ? `PR #${workflow.pr}` : `Issue #${workflow.issue}`}`;
+      const target = `${text(workflow.repository)} ${kind === "pr_merge_gate" ? `PR #${workflow.pr}` : `Issue #${workflow.issue}`}`;
       const message = kind === "pr_merge_gate"
         ? `将对 ${target} 记录一次人工强制放行，跳过本系统的自动审查门禁。GitHub 其他必需检查仍适用；这不会自动合并，仍需维护者在 GitHub 实际合并。确认继续？`
         : `将对 ${target} 强制进入开发，绕过需求 / 规格自动审批。此操作会记录操作者和被跳过的检查。确认继续？`;
