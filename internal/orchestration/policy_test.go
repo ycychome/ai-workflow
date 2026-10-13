@@ -1,10 +1,88 @@
 package orchestration
 
 import (
+	"archive/zip"
+	"bytes"
+	"io/fs"
 	"testing"
 
 	"github.com/ycychome/ai-workflow/internal/domain"
 )
+
+func TestDecodeArchiveNormalizesDOSZipPermissionsToGitModes(t *testing.T) {
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for _, entry := range []struct {
+		name string
+		mode fs.FileMode
+	}{
+		{name: "dos-default/go.sum"},
+		{name: "readonly.txt", mode: 0444},
+		{name: "private.txt", mode: 0600},
+		{name: "owner-execute.sh", mode: 0744},
+		{name: "group-execute.txt", mode: 0654},
+		{name: "other-execute.txt", mode: 0645},
+	} {
+		header := &zip.FileHeader{Name: "repo/" + entry.name}
+		if entry.mode != 0 {
+			header.SetMode(entry.mode)
+		}
+		file, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = file.Write([]byte(entry.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zr.File) == 0 || zr.File[0].ExternalAttrs != 0 || zr.File[0].Mode().Perm() != 0666 {
+		t.Fatalf("fixture must use ZIP DOS defaults: external_attrs=%#x mode=%#o", zr.File[0].ExternalAttrs, zr.File[0].Mode().Perm())
+	}
+	files, err := decodeArchive(archive.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]fs.FileMode{
+		"dos-default/go.sum": 0644,
+		"readonly.txt":       0644,
+		"private.txt":        0644,
+		"owner-execute.sh":   0755,
+		"group-execute.txt":  0644,
+		"other-execute.txt":  0644,
+	}
+	for name, mode := range want {
+		if got := files[name].Mode; got != mode {
+			t.Errorf("%s mode=%#o, want Git mode %#o", name, got, mode)
+		}
+	}
+}
+
+func TestDecodeArchiveRejectsSymlinksAndSetuid(t *testing.T) {
+	for _, mode := range []fs.FileMode{fs.ModeSymlink | 0777, fs.ModeSetuid | 0644} {
+		var archive bytes.Buffer
+		writer := zip.NewWriter(&archive)
+		header := &zip.FileHeader{Name: "repo/unsafe"}
+		header.SetMode(mode)
+		file, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = file.Write([]byte("content"))
+		if err = writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = decodeArchive(archive.Bytes()); err == nil {
+			t.Errorf("accepted unsupported ZIP mode %#o", mode)
+		}
+	}
+}
 
 func TestValidatePlanTaskKindScopes(t *testing.T) {
 	tests := []struct {

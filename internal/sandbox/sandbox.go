@@ -40,8 +40,8 @@ const (
 	maxArchiveBytes       = 256 << 20
 )
 
-// File is a regular file in a source snapshot. Mode is normalized to 0644 or
-// 0755; special files and symlinks are deliberately not representable.
+// File is a regular file in a source snapshot. Mode is normalized to Git's
+// 100644 or 100755 semantics; special files and symlinks are not representable.
 type File struct {
 	Data []byte
 	Mode fs.FileMode
@@ -219,10 +219,7 @@ func (m *Manager) Create(ctx context.Context, id string, files map[string]File) 
 	w.baseline = make(map[string]snapshotMeta, len(files))
 	for name, file := range files {
 		clean, _ := cleanRelativePath(name)
-		mode := fs.FileMode(0644)
-		if file.Mode&0111 != 0 {
-			mode = 0755
-		}
+		mode, _ := NormalizeGitFileMode(file.Mode) // snapshotTar validated this mode.
 		w.baseline[clean] = snapshotMeta{hash: sha256.Sum256(file.Data), mode: mode}
 	}
 	m.mu.Lock()
@@ -548,11 +545,8 @@ func (m *Manager) CollectChanges(ctx context.Context, w *Workspace) ([]Change, e
 		if h.Typeflag == tar.TypeDir {
 			continue
 		}
-		if h.Typeflag == tar.TypeSymlink || h.Typeflag == tar.TypeLink {
-			return nil, fmt.Errorf("cannot export non-regular changed path %q", p)
-		}
 		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
-			continue
+			return nil, fmt.Errorf("cannot export non-regular changed path %q", p)
 		}
 		clean, err := cleanRelativePath(p)
 		if err != nil {
@@ -565,13 +559,17 @@ func (m *Manager) CollectChanges(ctx context.Context, w *Workspace) ([]Change, e
 		if err != nil {
 			return nil, err
 		}
-		current[clean] = Change{Path: clean, Mode: fs.FileMode(h.Mode), Data: data}
+		mode, err := NormalizeGitFileMode(fs.FileMode(h.Mode))
+		if err != nil {
+			return nil, fmt.Errorf("cannot export changed path %q with unsupported mode: %w", clean, err)
+		}
+		current[clean] = Change{Path: clean, Mode: mode, Data: data}
 	}
 	changes := make([]Change, 0)
 	for name, base := range w.baseline {
 		if now, ok := current[name]; !ok {
 			changes = append(changes, Change{Path: name, Status: "D", Deleted: true})
-		} else if base.hash != sha256.Sum256(now.Data) || base.mode.Perm() != now.Mode.Perm() {
+		} else if base.hash != sha256.Sum256(now.Data) || base.mode != now.Mode {
 			now.Status = "M"
 			changes = append(changes, now)
 		}
@@ -856,6 +854,12 @@ func snapshotTar(files map[string]File) ([]byte, error) {
 			_ = tw.Close()
 			return nil, fmt.Errorf("snapshot cannot contain Git metadata: %q", name)
 		}
+		mode, err := NormalizeGitFileMode(file.Mode)
+		if err != nil {
+			_ = tw.Close()
+			return nil, fmt.Errorf("snapshot file %q has unsupported mode: %w", name, err)
+		}
+		file.Mode = mode
 		cleanFiles[clean] = file
 		for parent := path.Dir(clean); parent != "."; parent = path.Dir(parent) {
 			dirs[parent] = struct{}{}
@@ -885,11 +889,7 @@ func snapshotTar(files map[string]File) ([]byte, error) {
 	sort.Strings(fileNames)
 	for _, clean := range fileNames {
 		file := cleanFiles[clean]
-		mode := int64(0644)
-		if file.Mode&0111 != 0 {
-			mode = 0755
-		}
-		header := &tar.Header{Name: clean, Mode: mode, Size: int64(len(file.Data)), Typeflag: tar.TypeReg, Format: tar.FormatPAX}
+		header := &tar.Header{Name: clean, Mode: int64(file.Mode), Size: int64(len(file.Data)), Typeflag: tar.TypeReg, Format: tar.FormatPAX}
 		if err := tw.WriteHeader(header); err != nil {
 			_ = tw.Close()
 			return nil, err

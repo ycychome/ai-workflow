@@ -76,3 +76,9 @@
 真实 `connection-T01-001` 为独立接线探针，不计入十项正式冒烟或九十次对照；实际模型为 `deepseek-v4.1-flash`，已完成 triage／dev_planner 并进入 builder，尚无最终结论。有效配置摘要为 `e0e999c03544aac85929ecdd525f5882bb91cee78165aec2ebe4ecb12c42caed`；最终正式矩阵仍须在接线冻结后生成。证据位于 `live-runtime-001/`。
 
 远端 [run 38380058253](https://github.com/ycychome/ai-workflow/actions/runs/38380058253) 再次在 Docker Judge 层失败；artifact 上传另因 GitHub 存储配额已满而失败。已改为在控制台保留有界的真实失败输出，并允许 artifact 上传独立失败；核心测试的失败退出与 incomplete 判定不变。下一轮须依据实际诊断确定原因，不能删除远端数据、绕过测试或把 artifact 配额问题当作测试通过。
+
+真实接线探针曾在调用 62 次后因 `Git 树文件模式不支持：go.sum` 停于 BLOCKED。只读拉取真实 GitHub ZIP 证实其普通文件没有 Unix mode 属性；Go archive/zip 将这种 DOS 缺省权限解释为 0666，而旧 GitTreeSHA 只接受 0644／0755。远端基线 go.sum 摘要仍等于冻结清单，沙箱快照为 0644，不能把此问题归因于候选篡改锁文件。现已统一普通文件的 Git 权限语义，仅 owner execute 对应 100755，类型／setuid／setgid／sticky 继续拒绝；有真实 Git oracle、DOS ZIP 与权限差异回归。
+
+集成失败的恢复另发现 generation 递增会使已接受来源过期；已增加严格受控的集成检查点恢复，检查当前身份、来源摘要、已停止 Agent 与无未决写入，随后仍走正常完整集成校验。真实 `/ai resume` 已验证保持 generation 1、62 次 Issue 调用和 141 次每日累计；随后来源精确发布到私有测试 [PR #2](https://github.com/zymooll/ai-workflow-alpha-test/pull/2)，提交 `6d9cbda9cf5e81ae2ac2594e5d6d8c41200e0ca5`，回归任务仍在执行。这是接线恢复证据，不是完整 Alpha 放行。
+
+远端 [run 38389966626](https://github.com/ycychome/ai-workflow/actions/runs/38389966626) 的新诊断确认 Judge 用例约 60.9 秒后发生 context deadline／UNVERIFIED，属于测试基础设施期限不足。仅 Judge Docker 测试夹具扩展为有界 3 分钟，其他安全回归仍为 60 秒；Docker 层 Go 上限 60 分钟，CI job 上限 90 分钟，其他层仍 15 分钟。真实模型配置与预算不变，超时仍不能作为候选缺陷或安全通过。修复已通过 Go 单元／静态检查与隔离 PG 恢复边界检查，远端完整复跑仍须完成。

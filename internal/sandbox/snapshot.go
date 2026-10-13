@@ -51,9 +51,9 @@ func (m *Manager) Snapshot(ctx context.Context, w *Workspace) (map[string]File, 
 		if err != nil {
 			return nil, err
 		}
-		mode := fs.FileMode(0644)
-		if h.Mode&0111 != 0 {
-			mode = 0755
+		mode, err := NormalizeGitFileMode(fs.FileMode(h.Mode))
+		if err != nil {
+			return nil, fmt.Errorf("cannot export snapshot path %q with unsupported mode: %w", clean, err)
 		}
 		out[clean] = File{Data: content, Mode: mode}
 	}

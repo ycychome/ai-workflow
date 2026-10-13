@@ -88,6 +88,9 @@ def summarize_events(name, events, returncode, matrix=False):
             'passed': passed, 'skipped': skipped, 'failed': failed,
             'parent_helper_skips': helper_skips, 'unexecuted_skips': unexecuted}
 
+def go_test_timeout(name):
+    return '60m' if name == 'docker' else '15m'
+
 def run_go(args, name, packages, pattern=None, matrix=False):
     env = os.environ.copy()
     if name == 'unit':
@@ -105,7 +108,7 @@ def run_go(args, name, packages, pattern=None, matrix=False):
                 raise ValueError(f'{key} is required for the complete Docker/orchestration layer')
         env['AI_WORKFLOW_FORCE_INTEGRATION'] = '1'
         env['AI_WORKFLOW_FORCE_DOCKER'] = '1'
-    command = ['go', 'test', '-json', '-count=1', '-timeout=15m'] + packages
+    command = ['go', 'test', '-json', '-count=1', '-timeout=' + go_test_timeout(name)] + packages
     if pattern:
         command += ['-run', pattern]
     log = args.output / (name + '.jsonl')

@@ -24,11 +24,15 @@ import (
 )
 
 func safetyRegressionDB(t *testing.T) (*Engine, context.Context) {
+	return safetyRegressionDBWithTimeout(t, 60*time.Second)
+}
+
+func safetyRegressionDBWithTimeout(t *testing.T, timeout time.Duration) (*Engine, context.Context) {
 	t.Helper()
 	if os.Getenv("AI_WORKFLOW_FORCE_INTEGRATION") != "1" {
 		t.Skip("set AI_WORKFLOW_FORCE_INTEGRATION=1 in the controlled integration environment")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	cfg, err := config.Load(os.Getenv("CONFIG_FILE"))
 	if err != nil {

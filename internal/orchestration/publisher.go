@@ -483,6 +483,141 @@ func (e *Engine) resumeSkepticCheckpoint(ctx context.Context, w domain.Workflow,
 	return nil
 }
 
+// integrationCheckpointReady allows an infrastructure-failed integration to
+// resume against its exact accepted source snapshot. It deliberately does not
+// recover or publish anything here: the normal leased pipeline repeats the
+// complete integration validation and publication path after the command.
+func (e *Engine) integrationCheckpointReady(ctx context.Context, w domain.Workflow) (domain.IntegrationRecord, bool, error) {
+	if w.Phase != "BLOCKED" || w.Control != "ACTIVE" || !w.Spec.Approved || w.ProposalSpec != nil ||
+		w.Generation < 1 || w.BaseSHA == "" || w.HeadSHA == "" || w.Spec.Digest == "" {
+		return domain.IntegrationRecord{}, false, nil
+	}
+	var record domain.IntegrationRecord
+	count := 0
+	for _, candidate := range w.IntegrationRecords {
+		if candidate.Status == "PREPARING" || candidate.Status == "CLEANUP_PENDING" {
+			return domain.IntegrationRecord{}, false, nil
+		}
+		if candidate.Status == "FAILED" && candidate.Generation == w.Generation && candidate.ParentSHA == w.HeadSHA && candidate.SpecDigest == w.Spec.Digest {
+			record = candidate
+			count++
+		}
+	}
+	if count != 1 || record.ID == "" || len(record.ArtifactIDs) == 0 {
+		return domain.IntegrationRecord{}, false, nil
+	}
+	// A pending or uncertain publish may already have changed the remote PR.
+	// Keep the ordinary generation-changing resume path in that case.
+	clear, err := integrationCheckpointWritesClear(ctx, e.Store, w)
+	if err != nil {
+		return domain.IntegrationRecord{}, false, err
+	}
+	if !clear {
+		return domain.IntegrationRecord{}, false, nil
+	}
+
+	runs, err := e.Store.ListAgentRuns(ctx, w.ID)
+	if err != nil {
+		return domain.IntegrationRecord{}, false, err
+	}
+	byRun := make(map[string]domain.AgentRun, len(runs))
+	for _, run := range runs {
+		byRun[run.ID] = run
+		if run.Generation == w.Generation && run.StartedAt.IsZero() == false &&
+			(run.StoppedAt.IsZero() || run.Status == domain.AgentActive || run.Status == domain.AgentStopping) {
+			return domain.IntegrationRecord{}, false, nil
+		}
+	}
+
+	// LoadIntegrationInputs verifies the persisted record identity, source
+	// artifacts, evidence hashes and deterministic integration ID. The
+	// validator then checks the accepted attempt receipt and stopped builder
+	// run for every artifact.
+	record.Status = "PREPARING"
+	inputs, err := e.LoadIntegrationInputs(ctx, w, record)
+	if err != nil {
+		return domain.IntegrationRecord{}, false, nil
+	}
+	validatedCodeTasks := 0
+	for _, task := range w.Tasks {
+		if taskKind(task) == "code" && task.Status == "VALIDATED" {
+			validatedCodeTasks++
+		}
+	}
+	if validatedCodeTasks != len(inputs) {
+		return domain.IntegrationRecord{}, false, nil
+	}
+	seenTasks := map[string]bool{}
+	for _, input := range inputs {
+		if seenTasks[input.Task.ID] || e.validateIntegrationInput(ctx, w, input, byRun) != nil {
+			return domain.IntegrationRecord{}, false, nil
+		}
+		seenTasks[input.Task.ID] = true
+	}
+	return record, true, nil
+}
+
+func integrationCheckpointWritesClear(ctx context.Context, s *store.Store, w domain.Workflow) (bool, error) {
+	var pendingPublish, unknownWrite bool
+	if err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM outbox WHERE workflow_id=$1 AND kind='publish' AND state IN('pending','running','unknown','retry_wait'))`, w.ID).Scan(&pendingPublish); err != nil {
+		return false, err
+	}
+	if pendingPublish {
+		return false, nil
+	}
+	if err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM outbox WHERE workflow_id=$1 AND state='unknown')`, w.ID).Scan(&unknownWrite); err != nil {
+		return false, err
+	}
+	if unknownWrite {
+		return false, nil
+	}
+	pending, err := s.PendingWrites(ctx, w.ID)
+	if err != nil {
+		return false, err
+	}
+	return pending == 0, nil
+}
+
+func sameIntegrationCheckpoint(current, expected domain.Workflow, recordID string) bool {
+	if current.Version != expected.Version || current.ID != expected.ID || current.Generation != expected.Generation ||
+		current.BaseSHA != expected.BaseSHA || current.HeadSHA != expected.HeadSHA || current.Spec.Digest != expected.Spec.Digest ||
+		current.Phase != "BLOCKED" || current.Control != "ACTIVE" || !current.Spec.Approved || current.ProposalSpec != nil {
+		return false
+	}
+	for _, record := range current.IntegrationRecords {
+		if record.ID == recordID {
+			return record.Status == "FAILED" && record.Generation == current.Generation && record.ParentSHA == current.HeadSHA && record.SpecDigest == current.Spec.Digest
+		}
+	}
+	return false
+}
+
+func (e *Engine) resumeIntegrationCheckpoint(ctx context.Context, w domain.Workflow, record domain.IntegrationRecord) error {
+	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if !sameIntegrationCheckpoint(*x, w, record.ID) {
+			return nil, errors.New("恢复期间集成检查点已变化，请检查当前状态后重试 /ai resume")
+		}
+		clear, err := integrationCheckpointWritesClear(ctx, e.Store, *x)
+		if err != nil {
+			return nil, err
+		}
+		if !clear {
+			return nil, errors.New("恢复期间出现待确认的外部写入，集成检查点未恢复")
+		}
+		x.Control = "ACTIVE"
+		x.Phase = "DEVELOPING"
+		x.LastError = ""
+		return []store.Action{statusAction(*x)}, nil
+	})
+	if err != nil {
+		return err
+	}
+	e.Store.Audit(context.WithoutCancel(ctx), w.ID, "integration_checkpoint_resumed", map[string]any{
+		"integration_id": record.ID, "generation": w.Generation, "artifact_ids": record.ArtifactIDs,
+	})
+	return nil
+}
+
 // Command applies a maintainer command. Pass dashboard=true only after the local
 // dashboard has authenticated the caller; local fixture commands are dashboard-only.
 func (e *Engine) Command(ctx context.Context, workflowID, actor, command string, dashboard ...bool) error {
@@ -611,6 +746,11 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 		currentKey := e.key(ctx, refreshed)
 		if skepticCheckpointReady(refreshed, currentKey) {
 			return e.resumeSkepticCheckpoint(ctx, refreshed, currentKey)
+		}
+		if record, ready, err := e.integrationCheckpointReady(ctx, refreshed); err != nil {
+			return err
+		} else if ready {
+			return e.resumeIntegrationCheckpoint(ctx, refreshed, record)
 		}
 		return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 			if x.Version != refreshed.Version || x.Generation != refreshed.Generation {

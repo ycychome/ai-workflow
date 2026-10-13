@@ -93,7 +93,11 @@ func evaluationJudgeDockerFixture(t *testing.T, mutate func(map[string]sandbox.F
 }
 func evaluationJudgeDockerSetup(t *testing.T, scenario string, mutate func(map[string]sandbox.File)) (*Engine, context.Context, domain.Workflow, string, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
-	e, ctx := safetyRegressionDB(t)
+	e, ctx := safetyRegressionDBWithTimeout(t, 3*time.Minute)
+	// Cold compilation and Docker startup can be slow on hosted runners. Keep the
+	// candidate's real execution deadline bounded, but long enough to reach the
+	// actual security assertions under CI load.
+	e.cfg.Runner.AttemptMinutes = 3
 	root := filepath.Join("..", "..")
 	manifestPath := filepath.Join(root, "eval", "manifest.json")
 	manifestBody, err := os.ReadFile(manifestPath)

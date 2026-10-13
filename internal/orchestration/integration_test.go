@@ -21,6 +21,42 @@ func TestGitTreeSHAEmpty(t *testing.T) {
 	}
 }
 
+func TestGitTreeSHANormalizesRegularPermissionBits(t *testing.T) {
+	base := map[string]sandbox.File{"go.sum": {Data: []byte("module checksums\n"), Mode: 0644}}
+	want, err := GitTreeSHA(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []fs.FileMode{0444, 0600, 0640, 0654, 0645} {
+		files := map[string]sandbox.File{"go.sum": {Data: base["go.sum"].Data, Mode: mode}}
+		got, err := GitTreeSHA(files)
+		if err != nil || got != want {
+			t.Errorf("mode %#o changed a Git tree: got=%s want=%s err=%v", mode, got, want, err)
+		}
+	}
+	executable, err := GitTreeSHA(map[string]sandbox.File{"go.sum": {Data: base["go.sum"].Data, Mode: 0744}})
+	if err != nil || executable == want {
+		t.Fatalf("owner execute bit must change Git tree identity: got=%s base=%s err=%v", executable, want, err)
+	}
+}
+
+func TestGitPermissionOnlyChangesDoNotBecomeIntegrationScope(t *testing.T) {
+	base := map[string]sandbox.File{"go.sum": {Data: []byte("module checksums\n"), Mode: 0644}}
+	permissions := map[string]sandbox.File{"go.sum": {Data: base["go.sum"].Data, Mode: 0600}}
+	if !sameIntegrationFiles(base, permissions) {
+		t.Fatal("read/write permission differences must not change a Git source scope")
+	}
+	baseChange := sandbox.Change{Path: "go.sum", Status: "M", Data: base["go.sum"].Data, Mode: 0644}
+	permissionChange := baseChange
+	permissionChange.Mode = 0640
+	if !sameIntegrationChanges([]sandbox.Change{baseChange}, []sandbox.Change{permissionChange}) {
+		t.Fatal("permission-only snapshots must have the same integration changes")
+	}
+	if err := applyIntegrationChange(cloneSnapshot(base), base, permissionChange); err == nil {
+		t.Fatal("permission-only update must not masquerade as a source change")
+	}
+}
+
 // 对照真正的 Git 对象实现，覆盖目录排序、二进制内容与执行位。
 func TestGitTreeSHAMatchesGit(t *testing.T) {
 	git, err := exec.LookPath("git")
@@ -29,11 +65,16 @@ func TestGitTreeSHAMatchesGit(t *testing.T) {
 	}
 	root := t.TempDir()
 	files := map[string]sandbox.File{
-		"a.c":       {Data: []byte("普通文件\n"), Mode: 0644},
-		"a/z":       {Data: []byte{0, 1, 255, 10}, Mode: 0644},
-		"a0":        {Data: []byte("排序边界"), Mode: 0644},
-		"run.sh":    {Data: []byte("#!/bin/sh\nexit 0\n"), Mode: 0755},
-		"中文/工单.txt": {Data: []byte("工单内容"), Mode: 0644},
+		"a.c":               {Data: []byte("普通文件\n"), Mode: 0644},
+		"a/z":               {Data: []byte{0, 1, 255, 10}, Mode: 0644},
+		"a0":                {Data: []byte("排序边界"), Mode: 0644},
+		"run.sh":            {Data: []byte("#!/bin/sh\nexit 0\n"), Mode: 0755},
+		"中文/工单.txt":         {Data: []byte("工单内容"), Mode: 0644},
+		"readonly.txt":      {Data: []byte("只读文件"), Mode: 0444},
+		"private.txt":       {Data: []byte("仅所有者访问"), Mode: 0600},
+		"owner-execute.txt": {Data: []byte("所有者可执行"), Mode: 0744},
+		"group-execute.txt": {Data: []byte("仅组执行位"), Mode: 0654},
+		"other-execute.txt": {Data: []byte("仅其他执行位"), Mode: 0645},
 	}
 	run := func(args ...string) string {
 		t.Helper()
@@ -68,7 +109,8 @@ func TestGitTreeSHAMatchesGit(t *testing.T) {
 func TestGitTreeRejectsUnsafeSnapshots(t *testing.T) {
 	cases := []map[string]sandbox.File{
 		{"../escape": {Mode: 0644}}, {".git/config": {Mode: 0644}}, {"dir/.git/config": {Mode: 0644}},
-		{"link": {Mode: fs.ModeSymlink | 0755}}, {"special": {Mode: 0600}},
+		{"link": {Mode: fs.ModeSymlink | 0755}}, {"directory": {Mode: fs.ModeDir | 0755}},
+		{"setuid": {Mode: fs.ModeSetuid | 0644}}, {"setgid": {Mode: fs.ModeSetgid | 0644}}, {"sticky": {Mode: fs.ModeSticky | 0644}},
 		{"a": {Mode: 0644}, "a/b": {Mode: 0644}}, {"nul\x00name": {Mode: 0644}},
 	}
 	for i, files := range cases {

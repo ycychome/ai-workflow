@@ -387,7 +387,7 @@ func (e *Engine) build(ctx context.Context, w *domain.Workflow) error {
 		}
 		for _, change := range res.changes {
 			mode := "100644"
-			if change.Mode&0111 != 0 {
+			if change.Mode&0100 != 0 {
 				mode = "100755"
 			}
 			changes = append(changes, gh.FileChange{Path: change.Path, Content: change.Data, Delete: change.Deleted, Mode: mode})

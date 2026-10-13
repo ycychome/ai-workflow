@@ -8,6 +8,12 @@ acceptance = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(acceptance)
 
 class AcceptanceSummaryTests(unittest.TestCase):
+    def test_go_test_timeouts_are_extended_only_for_docker_layer(self):
+        self.assertEqual(acceptance.go_test_timeout('docker'), '60m')
+        for layer in ('unit', 'postgres', 'T01'):
+            with self.subTest(layer=layer):
+                self.assertEqual(acceptance.go_test_timeout(layer), '15m')
+
     def test_no_named_test_is_not_run(self):
         result = acceptance.summarize_events('docker', [{'Action': 'pass', 'Package': 'sandbox'}], 0)
         self.assertEqual(result['status'], 'not_run')

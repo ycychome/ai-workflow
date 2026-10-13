@@ -179,7 +179,13 @@ func publishChangesExactlyMatch(base, head map[string]sandbox.File, changes []gh
 	for path := range paths {
 		before, hadBefore := base[path]
 		after, hasAfter := head[path]
-		if hadBefore == hasAfter && (!hadBefore || (before.Mode.Perm() == after.Mode.Perm() && bytes.Equal(before.Data, after.Data))) {
+		modeUnchanged := !hadBefore
+		if hadBefore && hasAfter {
+			beforeMode, beforeErr := sandbox.NormalizeGitFileMode(before.Mode)
+			afterMode, afterErr := sandbox.NormalizeGitFileMode(after.Mode)
+			modeUnchanged = beforeErr == nil && afterErr == nil && beforeMode == afterMode
+		}
+		if hadBefore == hasAfter && (!hadBefore || (modeUnchanged && bytes.Equal(before.Data, after.Data))) {
 			continue
 		}
 		change, ok := wanted[path]
@@ -197,7 +203,8 @@ func publishChangesExactlyMatch(base, head map[string]sandbox.File, changes []gh
 			} else if change.Mode != "" && change.Mode != "100644" {
 				return false
 			}
-			if !hasAfter || uint32(after.Mode.Perm()) != mode || !bytes.Equal(after.Data, change.Content) {
+			afterMode, modeErr := sandbox.NormalizeGitFileMode(after.Mode)
+			if !hasAfter || modeErr != nil || uint32(afterMode) != mode || !bytes.Equal(after.Data, change.Content) {
 				return false
 			}
 		}

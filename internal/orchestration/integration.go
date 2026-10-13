@@ -538,13 +538,21 @@ func applyIntegrationChange(target, base map[string]sandbox.File, c sandbox.Chan
 		delete(target, c.Path)
 		return nil
 	}
-	if c.Mode != fs.FileMode(0644) && c.Mode != fs.FileMode(0755) {
+	mode, err := sandbox.NormalizeGitFileMode(c.Mode)
+	if err != nil {
 		return errors.New("来源变更不是允许的普通文件模式")
 	}
 	if (c.Status == "A" && exists) || (c.Status == "M" && !exists) || (c.Status != "A" && c.Status != "M") {
 		return errors.New("来源变更类型与基线不匹配")
 	}
-	if exists && bytes.Equal(original.Data, c.Data) && original.Mode.Perm() == c.Mode.Perm() {
+	originalMode := fs.FileMode(0644)
+	if exists {
+		originalMode, err = sandbox.NormalizeGitFileMode(original.Mode)
+		if err != nil {
+			return errors.New("集成基线包含不支持的文件模式")
+		}
+	}
+	if exists && bytes.Equal(original.Data, c.Data) && originalMode == mode {
 		return errors.New("来源产物包含没有实际变化的路径")
 	}
 	for name := range base {
@@ -552,7 +560,7 @@ func applyIntegrationChange(target, base map[string]sandbox.File, c sandbox.Chan
 			return errors.New("文件与目录结构替换需要独立冲突修复任务")
 		}
 	}
-	target[c.Path] = sandbox.File{Data: append([]byte(nil), c.Data...), Mode: c.Mode}
+	target[c.Path] = sandbox.File{Data: append([]byte(nil), c.Data...), Mode: mode}
 	return nil
 }
 func sameIntegrationFiles(a, b map[string]sandbox.File) bool {
@@ -561,7 +569,9 @@ func sameIntegrationFiles(a, b map[string]sandbox.File) bool {
 	}
 	for name, file := range a {
 		other, ok := b[name]
-		if !ok || file.Mode.Perm() != other.Mode.Perm() || !bytes.Equal(file.Data, other.Data) {
+		fileMode, fileErr := sandbox.NormalizeGitFileMode(file.Mode)
+		otherMode, otherErr := sandbox.NormalizeGitFileMode(other.Mode)
+		if !ok || fileErr != nil || otherErr != nil || fileMode != otherMode || !bytes.Equal(file.Data, other.Data) {
 			return false
 		}
 	}
@@ -576,7 +586,13 @@ func sameIntegrationChanges(a, b []sandbox.Change) bool {
 	sort.Slice(x, func(i, j int) bool { return x[i].Path < x[j].Path })
 	sort.Slice(y, func(i, j int) bool { return y[i].Path < y[j].Path })
 	for i := range x {
-		if x[i].Path != y[i].Path || x[i].Status != y[i].Status || x[i].Deleted != y[i].Deleted || !bytes.Equal(x[i].Data, y[i].Data) || !x[i].Deleted && x[i].Mode.Perm() != y[i].Mode.Perm() {
+		modeEqual := true
+		if !x[i].Deleted {
+			xMode, xErr := sandbox.NormalizeGitFileMode(x[i].Mode)
+			yMode, yErr := sandbox.NormalizeGitFileMode(y[i].Mode)
+			modeEqual = xErr == nil && yErr == nil && xMode == yMode
+		}
+		if x[i].Path != y[i].Path || x[i].Status != y[i].Status || x[i].Deleted != y[i].Deleted || !bytes.Equal(x[i].Data, y[i].Data) || !modeEqual {
 			return false
 		}
 	}
@@ -593,10 +609,11 @@ type gitTreeNode struct {
 func GitTreeSHA(files map[string]sandbox.File) (string, error) {
 	root := &gitTreeNode{map[string]sandbox.File{}, map[string]*gitTreeNode{}}
 	for name, file := range files {
-		if !safePath(name) || strings.ContainsRune(name, 0) || file.Mode&fs.ModeType != 0 {
+		if !safePath(name) || strings.ContainsRune(name, 0) {
 			return "", errors.New("Git 树包含不支持的路径或非普通文件")
 		}
-		if file.Mode.Perm() != 0644 && file.Mode.Perm() != 0755 {
+		mode, err := sandbox.NormalizeGitFileMode(file.Mode)
+		if err != nil {
 			return "", fmt.Errorf("Git 树文件模式不支持：%s", name)
 		}
 		parts := strings.Split(name, "/")
@@ -619,7 +636,7 @@ func GitTreeSHA(files map[string]sandbox.File) (string, error) {
 		if node.dirs[leaf] != nil {
 			return "", errors.New("Git 树存在目录与文件冲突")
 		}
-		node.files[leaf] = file
+		node.files[leaf] = sandbox.File{Data: file.Data, Mode: mode}
 	}
 	sum := gitTreeHash(root)
 	return hex.EncodeToString(sum[:]), nil
@@ -651,7 +668,7 @@ func gitTreeHash(node *gitTreeNode) [sha1.Size]byte {
 		} else {
 			file := node.files[entry]
 			mode := "100644"
-			if file.Mode.Perm()&0111 != 0 {
+			if file.Mode&0100 != 0 {
 				mode = "100755"
 			}
 			sum := gitObjectHash("blob", file.Data)

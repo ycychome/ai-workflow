@@ -412,7 +412,13 @@ func (e *Engine) candidateDiff(ctx context.Context, w domain.Workflow, base map[
 	for p := range names {
 		a, aok := base[p]
 		b, bok := head[p]
-		if aok == bok && domain.Digest(a.Data) == domain.Digest(b.Data) && a.Mode == b.Mode {
+		modeUnchanged := !aok
+		if aok && bok {
+			aMode, aErr := sandbox.NormalizeGitFileMode(a.Mode)
+			bMode, bErr := sandbox.NormalizeGitFileMode(b.Mode)
+			modeUnchanged = aErr == nil && bErr == nil && aMode == bMode
+		}
+		if aok == bok && domain.Digest(a.Data) == domain.Digest(b.Data) && modeUnchanged {
 			continue
 		}
 		changes = append(changes, map[string]any{"path": p, "deleted": !bok, "added": !aok, "base": e.redact(string(a.Data)), "candidate": e.redact(string(b.Data))})

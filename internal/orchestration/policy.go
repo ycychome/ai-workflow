@@ -217,6 +217,10 @@ func decodeArchive(b []byte) (map[string]sandbox.File, error) {
 		if !safePath(p) || !f.Mode().IsRegular() {
 			return nil, fmt.Errorf("归档条目 %s 不受支持", p)
 		}
+		mode, e := sandbox.NormalizeGitFileMode(f.Mode())
+		if e != nil {
+			return nil, fmt.Errorf("归档条目 %s 的文件模式不受支持: %w", p, e)
+		}
 		if f.UncompressedSize64 > 8<<20 {
 			return nil, errors.New("源码文件超过 8 MiB")
 		}
@@ -236,7 +240,7 @@ func decodeArchive(b []byte) (map[string]sandbox.File, error) {
 		if len(data) > 8<<20 {
 			return nil, errors.New("源码文件过大")
 		}
-		out[p] = sandbox.File{Data: data, Mode: f.Mode().Perm()}
+		out[p] = sandbox.File{Data: data, Mode: mode}
 	}
 	if len(out) == 0 {
 		return nil, errors.New("源码快照为空")
