@@ -7,19 +7,80 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 spec = importlib.util.spec_from_file_location("pilot_admin", Path(__file__).with_name("pilot-github-admin.py"))
 admin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(admin)
+target_spec = importlib.util.spec_from_file_location("evaluation_target", Path(__file__).with_name("pilot-eval-target.py"))
+target_policy = importlib.util.module_from_spec(target_spec)
+target_spec.loader.exec_module(target_policy)
+
+def evaluation_operator_token():
+    if os.environ.get("PILOT_EVAL_WRITE_TOKEN") or os.environ.get("PILOT_EVAL_WRITE_TOKEN_FILE"):
+        return admin.secret("PILOT_EVAL_WRITE_TOKEN")
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(["git", "credential", "fill"], input=b"protocol=https\nhost=github.com\n\n", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("缺少评估操作员凭据；设置 PILOT_EVAL_WRITE_TOKEN(_FILE) 或配置 github.com Git credential") from None
+    if result.returncode != 0:
+        raise ValueError("无法从 github.com Git credential 取得评估操作员凭据")
+    fields = {}
+    for line in result.stdout.decode("utf-8", errors="strict").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key] = value
+    if fields.get("host") != "github.com" or not fields.get("username") or not fields.get("password"):
+        raise ValueError("github.com Git credential 未返回有效操作员身份")
+    return fields["password"]
 
 class EvaluationGitHub:
     def __init__(self):
-        self.admin = admin.Adapter()
-        self.prefix = "/repos/" + admin.REPO
+        # Evaluation uses a dedicated GitHub client: constructing the destructive
+        # admin adapter would also log into the maintenance control plane.
+        self.http = admin.HTTP()
+        self.operator_token = evaluation_operator_token()
+        self.installation_token = None
+        self.prefix = "/repos/" + target_policy.TARGET_REPOSITORY
 
     def gh(self, method, path, body=None, missing=False):
-        return self.admin.gh(method, self.prefix + path, body, missing=missing)
+        # The App token is deliberately read-only. Hash-pinned workflow files
+        # and frozen Git objects are written with the already verified operator.
+        token = self.installation_token if method == "GET" and self.installation_token else self.operator_token
+        return self.http.call(method, admin.API + self.prefix + path, body, token=token, missing=missing)
+
+    def identity(self, request):
+        target_policy.validate_identity(request.get("repository"), request.get("repository_id"), request.get("installation_id"), request.get("app_id"))
+        configured_app_id = int(os.environ["PILOT_GITHUB_APP_ID"])
+        if configured_app_id != request["app_id"]:
+            raise ValueError("显式 App ID 与本机配置不匹配")
+        user = self.http.call("GET", admin.API + "/user", token=self.operator_token)
+        repo = self.http.call("GET", admin.API + "/repos/" + target_policy.TARGET_REPOSITORY, token=self.operator_token)
+        if (repo.get("full_name") != target_policy.TARGET_REPOSITORY or repo.get("id") != target_policy.TARGET_REPOSITORY_ID
+                or not repo.get("permissions", {}).get("admin") or user.get("type") != "User"
+                or user.get("login") != target_policy.TARGET_OWNER_LOGIN or user.get("id") != target_policy.TARGET_OWNER_ID):
+            raise ValueError("当次操作员不是已核验的仓库所有者，或测试仓库数字 ID 不匹配")
+        app_token = admin.app_jwt()
+        installation = self.http.call("GET", admin.API + "/repos/" + target_policy.TARGET_REPOSITORY + "/installation", token=app_token)
+        if installation.get("id") != request["installation_id"] or installation.get("app_id") != request["app_id"]:
+            raise ValueError("测试仓库的真实 App 安装身份不匹配")
+        return {"repository": target_policy.TARGET_REPOSITORY, "repository_id": repo["id"], "installation_id": installation["id"], "app_id": installation["app_id"], "actor": {"login": user["login"], "id": user["id"], "admin": True}}, app_token
+
+    def authorize_installation_token(self, identity, app_token):
+        required = {"actions": "read", "contents": "read", "pull_requests": "read"}
+        result = self.http.call("POST", admin.API + "/app/installations/" + str(identity["installation_id"]) + "/access_tokens", {"repository_ids": [target_policy.TARGET_REPOSITORY_ID], "permissions": required}, token=app_token)
+        permissions = result.get("permissions", {})
+        repositories = result.get("repositories", [])
+        unrequested_writes = [name for name, level in permissions.items() if level == "write" and required.get(name) != "write"]
+        if (any(permissions.get(name) != level for name, level in required.items())
+                or unrequested_writes
+                or len(repositories) != 1 or repositories[0].get("id") != target_policy.TARGET_REPOSITORY_ID
+                or not result.get("token")):
+            raise ValueError("测试仓库的 App 安装缺少评估所需的单仓库只读权限")
+        self.installation_token = result["token"]
 
     def tree_files(self, sha):
         result = self.gh("GET", "/git/trees/" + sha + "?recursive=1")
@@ -55,9 +116,8 @@ class EvaluationGitHub:
             raise ValueError("试验引用读回不匹配")
 
     def prepare(self, request):
-        identity = self.admin.identity()
-        if any(request.get(k) != identity[k] for k in ("repository", "repository_id", "installation_id")):
-            raise ValueError("评估目标身份不匹配")
+        identity, app_token = self.identity(request)
+        self.authorize_installation_token(identity, app_token)
         trial = request["trial"]
         trial_id = trial["trial_id"]
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", trial_id) or request["idempotency_key"] != trial_id:
@@ -142,7 +202,7 @@ class EvaluationGitHub:
             if remote_base != baseline_files:
                 raise ValueError("远端基线树与实际冻结基线不完全相等")
             if trial["kind"] == "review" and not state.get("pull_request"):
-                head = admin.REPO.split("/")[0] + ":" + state["candidate_branch"]
+                head = target_policy.TARGET_REPOSITORY.split("/")[0] + ":" + state["candidate_branch"]
                 query = "/pulls?state=all&head=" + admin.urllib.parse.quote(head, safe="") + "&base=" + admin.urllib.parse.quote(state["base_branch"], safe="")
                 matches = self.gh("GET", query)
                 if len(matches) > 1:
@@ -168,8 +228,9 @@ class EvaluationGitHub:
 
 def main():
     request = json.loads(sys.stdin.buffer.read(32 << 20))
-    if request.get("protocol") != "pilot-eval-prepare/v1" or request.get("operation") != "prepare_independent_trial" or request.get("repository") != admin.REPO:
+    if request.get("protocol") != "pilot-eval-prepare/v1" or request.get("operation") != "prepare_independent_trial":
         raise ValueError("不支持的评估准备请求")
+    target_policy.validate_identity(request.get("repository"), request.get("repository_id"), request.get("installation_id"), request.get("app_id"))
     result = EvaluationGitHub().prepare(request)
     print(json.dumps({"protocol": "pilot-eval-prepare/v1", "ok": True, **result}, ensure_ascii=False))
 

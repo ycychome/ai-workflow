@@ -97,4 +97,8 @@ Docker Go 测试默认用 `ai-workflow-runner:local`；它与部署配置的 alp
 
 ### 后续真实仓库联调
 
-下一次真实 GitHub 联调的指定目标为 `ycychome/test-repo-for-ai-test`。本轮收尾未对该仓库执行写入，也未完成评估适配器的跨仓库支持：当前 `pilot-eval-prepare.py` / `pilot-eval-github.py` 仍保留旧目标与管理适配器约束，不能仅更换环境变量就视为支持新仓库。后续应先实现并离线验证显式仓库名、数字 repository ID、App ID 和 installation ID 的绑定，使用安装令牌核验内容、Issue、PR 及冻结 workflow 文件所需权限；普通评估不应依赖重置管理权限或修改维护锁。`pilot-reset.py` 与管理重置适配器的旧仓库硬边界保持不变，新联调目标不授予重置授权。真实联调结果仍待独立记录。
+真实 GitHub 联调的指定目标为 `zymooll/ai-workflow-alpha-test`，数字 ID 固定为 `1416790756`（用户要求个人账号下新建的私有测试仓库）。`pilot-eval-prepare.py` / `pilot-eval-github.py` 已改为独立的评估目标接线，要求显式提供 `--repository`、`--repository-id`、`--app-id` 与 `--installation-id`；名称或数字 ID 不匹配时，在访问 GitHub 之前拒绝请求。保存的准备回执也绑定四项身份，旧格式和混合身份不能直接恢复。
+
+适配器先核验当次人类操作员是所有者 `zymooll`／`51841832` 且具有目标仓库 admin 权限，再用 App JWT 验证该仓库的 installation／App 身份，并申请只限该仓库的 `actions:read`、`contents:read`、`pull_requests:read` 安装令牌。只读远端核验使用此令牌；安装经哈希固定的 CI 文件、创建冻结 Git 对象／引用及审查 PR 使用已核验的操作员凭据。操作员凭据通过 `PILOT_EVAL_WRITE_TOKEN(_FILE)` 独立设置，未设置则读取 github.com Git credential helper；需具备写入 workflow 文件的权限，App 不需要新增 `workflows:write`。评估不会构造重置维护 Adapter，也不需要登录维护控制面。`pilot-reset.py` 与管理重置适配器的旧仓库边界保持不变。
+
+原组织 installation `170592609` 的添加请求被 GitHub 以 403 拒绝，用户随后改用个人账号新建的测试仓库。安装现有 Public App `5285791` 时选择 `zymooll`、`Only select repositories` 并仅勾选 `ai-workflow-alpha-test`；重新取得个人 installation ID，不能沿用组织安装 ID。评估仍需真实安装核验，不能用管理员写入替代 App 联调。当前证据及剩余正式验收见 [alpha-acceptance.md](alpha-acceptance.md)。

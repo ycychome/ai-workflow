@@ -1,6 +1,6 @@
 # Alpha 集中验收记录
 
-状态：**本地验收收尾并提交 PR，完整 Alpha 尚未正式放行**。本次按要求先完成全部实现，再统一运行测试。以下结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
+状态：**PR #3 已接手续验，已创建个人测试仓库并转接验收，App 安装待确认，完整 Alpha 尚未正式放行**。实现阶段结束后统一运行测试。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
 
 ## 已取得的本地证据
 
@@ -39,10 +39,32 @@
 
 ## 尚待完成
 
-- 后续真实联调目标改为用户指定的 `ycychome/test-repo-for-ai-test`；评估适配器与 App 身份接线尚未完成。旧 pilot 未重置。
+- 真实联调目标为用户指定的 `ycychome/test-repo-for-ai-test`；用户随后改为个人账号测试仓库，已创建 `zymooll/ai-workflow-alpha-test`（`1416790756`），评估入口固定到该目标，App 安装待完成。旧 pilot 未重置。
 - 真实 GitHub App／可信 CI 签发与最终门禁联调。
 - 十项真实冒烟、九十次同预算开发对照、二十个固定候选审查、维护者标签校核和人工合并。
 
 原部署已只读核验：每 Issue 200 次调用、每日 500 次、每 Issue 120 分钟、最多 2 次尝试及 2 轮修复；开发／审查模型均为 `deepseek-v4.1-flash`。价格为零表示未知，不能据此宣称免费。真实试验必须冻结有效配置，不使用本地合成测试的示例预算。
 
 本轮收尾时经 Git credential helper 只读核验，`zymooll` 对实现仓库与新测试仓库具有管理权限；新测试仓库数字 ID 为 `1415305337`。现有 App 对新仓库的安装查询返回 404，尚未验证可用安装。用户随后要求结束测试并提交 PR，因此本轮不启动新远端试验，也不执行旧仓库重置。
+
+## 2026-10-13 PR #3 接续验收
+
+用户在新会话要求接手完成 PR #3 验收，因此接续此前未运行的真实联调与评估。使用独立 `pr3-acceptance` 工作树；原工作树中的测试证据保留在 `dynamic-agents-alpha/acceptance-evidence/`，本轮证据保存在 `pr3-acceptance/acceptance-evidence/`。以下状态只覆盖实际取得的证据。
+
+| 范围 | 结果 | 本轮证据 |
+|---|---|---|
+| 原全量 race 与源码一致性 | 校验原 JSONL 哈希及 577 pass／0 fail／2 helper skip；28 个架构场景均找到实际 pass。268 个快照文件中 264 个匹配接手时 HEAD `d422ff5`，4 个差异均为文档 | `source-evidence-audit.json` |
+| 新测试仓库评估适配器 | 固定名称与数字 ID，显式绑定 App／installation；管理员安装冻结 CI，App 只读核验；恢复拒绝旧格式及混合身份回执，评估不登录重置维护控制面 | `target-regressions-001/`、`resume-regressions-001/` |
+| Python 完整回归 | 个人目标接线完整复测 45 项通过，0 失败；覆盖评估、120 项离线准备、恢复身份、旧维护与重置边界、验收汇总 | `personal-target-regressions-001/summary.json` |
+| 可执行文件 | 当前源码的 `control` 与 `ci-receipt` 均构建成功；未以构建成功替代运行验收 | 本地构建产物 |
+| 评估准备 | 从实际配置加载器导出的非敏感有效配置生成 90 项矩阵和 10 个独立冒烟候选；隐藏 Judge 素材位于控制侧，人工标签仍 pending | `frozen-evaluation-001/` |
+| GitHub 账号与目标 | 当次 `zymooll` 对目标仓库有 admin；repo `1415305337`，App `5285791`，现有 installation `170592609` 属于 `ycychome`，范围为 selected | `live-preflight.json` |
+| App 安装访问权 | App 查询新仓库 installation 返回 404。仅为该仓库添加安装范围的 API 请求返回 403，要求 Organization Owner；请求未生效 | `app-repository-installation.json` |
+
+原组织安装请求被拒后，用户要求在个人账号创建测试仓库。已创建私有 `zymooll/ai-workflow-alpha-test`（repo ID `1416790756`），仅包含 GitHub 初始化的 README，未重置原组织仓库。评估准备固定核验此仓库、所有者 `zymooll`／`51841832` 和 App `5285791`；安装 ID 将在个人安装完成后重新核验。写入凭据独立配置为 `PILOT_EVAL_WRITE_TOKEN(_FILE)`，未显式设置时读取 Git credential helper。当前尚未启动真实模型试验，未消费新的模型调用额度。
+
+冻结矩阵配置摘要为 `6a3588991b1f35f2a972af1f45476725ce1a1c23e11ca83043cd65c703251767`，清单摘要为 `dd2af917d6bb1f4f1297fe0045f6a1577a6d0487c97b721000fec84798c27f3a`。该矩阵为接线前的准备记录；个人仓库、安装与可信 CI 配置会改变 model_profile，因此部署后必须重新从 `/api/evaluation/config` 导出并冻结新矩阵，其摘要一致才可执行；按日额度必须保留并持续累计，不能通过换库或重启清零。
+
+安装范围补齐后，顺序为：重新核验 App 身份 → 安装固定可信 CI 与独立基线 → 隔离部署并核对有效配置／当前额度 → 真实 GitHub App／宿主签发与最终门禁联调 → 十项冒烟 → 九十次对照及二十个盲审 → 维护者标签校核与人工合并。App／CI、模型结果、人工标签和人工合并仍为未验收；适配器离线测试没有将这些条目标为通过。
+
+远端接手时 HEAD `d422ff5` 的 [Actions run 38375368409](https://github.com/ycychome/ai-workflow/actions/runs/38375368409) 已结束：`control/checks` 通过，隔离验收失败。后者的 unit、PostgreSQL 和 T01–T28 层通过，Docker Judge 层失败；原日志只有失败名称而没有原始 Go 输出，不能据此确认根因。相同失败入口在独立 Colima／PG 定向复跑全部通过（隐藏判定 39.75 秒、伪造用例 92.85 秒、20 候选 291.19 秒）。本轮只增加总是上传 CI 验收 JSONL／摘要的步骤，不降低 Judge 断言或把未复现的远端失败记成通过；后续运行以远端完整证据为准。

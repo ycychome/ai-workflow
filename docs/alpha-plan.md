@@ -1,5 +1,7 @@
 # 从 MVP 到完整 v0.4 与 M4 有限 Alpha
 
+> 2026-10-13 接续状态：用户在新会话中要求完成 PR #3 验收，已恢复验收准备；新测试仓库的适配器与恢复身份接线通过回归，用户改用个人测试仓库，App 安装待完成。实际结果见 [集中验收记录](alpha-acceptance.md#2026-10-13-pr-3-接续验收)。下方收尾决定描述此前提交 PR 时的范围，不限制本次已授权的接续验收。
+
 > 本轮收尾决定：用户指定后续真实联调目标为 `ycychome/test-repo-for-ai-test`，随后要求结束测试并提交 PR。本计划中的真实试验与人工验收保留为未完成项；旧 pilot 重置工具仅保留原目标范围，不在本轮执行。当前证据见 [集中验收记录](alpha-acceptance.md)。
 
 本计划以当前 `codex/dynamic-agents-alpha` 工作区源码、`docs/plan/Architecture_v0.4_Reviewed.md` 与 `docs/alpha-implementation.md` 为依据。目标是可恢复、可核验、支持动态双团队协作的 GitHub 开发工作流，最后由维护者合并。不是把更多固定角色接到串行脚本上，也不能把历史 MVP 测试结果作为本轮完成证据。
