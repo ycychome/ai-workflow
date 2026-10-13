@@ -393,7 +393,7 @@ func publicConfig(cfg config.Config) map[string]any {
 	return map[string]any{
 		"github":       map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL, "configured": cfg.GitHub.AppID > 0},
 		"model":        map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "attempt_minutes": cfg.Runner.AttemptMinutes},
+		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "require_accept_for_development": cfg.Runner.RequireAcceptForDevelopment, "attempt_minutes": cfg.Runner.AttemptMinutes},
 		"budget":       map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		"repositories": repos,
 	}
@@ -412,12 +412,13 @@ type settingsUpdate struct {
 		Token           string  `json:"token"`
 	} `json:"model"`
 	Runner struct {
-		Mode                     *string `json:"mode"`
-		Builders                 *int    `json:"builders"`
-		Reviewers                *int    `json:"reviewers"`
-		WorkflowConcurrency      *int    `json:"workflow_concurrency"`
-		RequireAcceptForAnalysis *bool   `json:"require_accept_for_analysis"`
-		AttemptMinutes           *int    `json:"attempt_minutes"`
+		Mode                        *string `json:"mode"`
+		Builders                    *int    `json:"builders"`
+		Reviewers                   *int    `json:"reviewers"`
+		WorkflowConcurrency         *int    `json:"workflow_concurrency"`
+		RequireAcceptForAnalysis    *bool   `json:"require_accept_for_analysis"`
+		RequireAcceptForDevelopment *bool   `json:"require_accept_for_development"`
+		AttemptMinutes              *int    `json:"attempt_minutes"`
 	} `json:"runner"`
 	Budget struct {
 		IssueCalls   *int     `json:"issue_calls"`
@@ -437,7 +438,7 @@ func (h *Handlers) settings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"github": map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL},
 			"model":  map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "attempt_minutes": cfg.Runner.AttemptMinutes},
+			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "require_accept_for_development": cfg.Runner.RequireAcceptForDevelopment, "attempt_minutes": cfg.Runner.AttemptMinutes},
 			"budget": map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		})
 	case http.MethodPost:
@@ -495,6 +496,9 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.Runner.WorkflowConcurrency != nil {
 		cfg.Runner.WorkflowConcurrency = *update.Runner.WorkflowConcurrency
+	}
+	if update.Runner.RequireAcceptForDevelopment != nil {
+		cfg.Runner.RequireAcceptForDevelopment = *update.Runner.RequireAcceptForDevelopment
 	}
 	if update.Runner.RequireAcceptForAnalysis != nil {
 		cfg.Runner.RequireAcceptForAnalysis = *update.Runner.RequireAcceptForAnalysis

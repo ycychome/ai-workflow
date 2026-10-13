@@ -96,6 +96,27 @@ tunnel process restarts; update the GitHub App webhook URL after each change.
 For a fixed-domain server deployment, configure that domain as the public URL
 and set the App webhook endpoint to `https://<domain>/webhooks/github`.
 
+## Automatic requirement approval
+
+AI Triage approves a valid `accepted` TaskSpec and automatically enters
+`PLANNING` by default. The approval identity is `ai:dev-triage`; an atomic
+`ai_spec_approved` audit event records the generation, specification/source
+digests and acceptance criteria. Both real and Fake modes use this rule.
+
+The execution settings expose two independent gates, both defaulting to false:
+`runner.require_accept_for_analysis` waits for `/ai accept` before analysis;
+`runner.require_accept_for_development` waits for `/ai accept` after AI has
+agreed to execute the request. The second gate keeps a proposal in `SPEC_READY`;
+manual acceptance then starts development. Turning it off releases current
+valid ACTIVE proposals; startup also resumes these when automatic approval is
+enabled. Paused/cancelled workflows and stale proposals remain unchanged.
+
+The normal accepted path runs analysis, development, verification, Review and
+Skeptic automatically and stops at human merge. Requests for clarification,
+rejection/defer decisions and execution failures remain visible exceptions.
+The approval policy does not change isolation, budgets, protected paths or
+GitHub merge rules.
+
 ## GitHub state labels
 
 The service reserves the `ai-workflow:` label prefix. It synchronizes a current
@@ -120,7 +141,8 @@ Use the dashboard to inspect workflow phase, control state, event audit, task
 reports, evidence, model usage, and review coverage. Pause or take over a
 workflow when review evidence is incomplete or uncertain. When an ACTIVE workflow
 asks for clarification (`NEEDS_INFO`), an authorized human Maintainer can reply
-directly on the Issue; no mention or extra command is needed to restart analysis.
+directly on the Issue; no mention or extra command is needed to restart analysis. An accepted AI
+result then follows the configured development acceptance gate.
 Replies never approve a proposed specification, unpause a workflow, or take it
 back from human ownership. Approve a resulting TaskSpec explicitly with `/ai accept`. The service uses a
 durable PostgreSQL database and `/data` volume, with a webhook Inbox and an

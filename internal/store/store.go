@@ -353,6 +353,9 @@ func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action)
 			return e
 		}
 	}
+	if e = recordAISpecApproval(ctx, tx, *w); e != nil {
+		return e
+	}
 	if e = queueLabelSync(ctx, tx, *w); e != nil {
 		return e
 	}
@@ -411,6 +414,9 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 		return err
 	}
 	if err = obsoleteUnstartedActions(ctx, tx, id, oldGeneration, oldControl, w.Generation, w.Control); err != nil {
+		return err
+	}
+	if err = recordAISpecApproval(ctx, tx, w); err != nil {
 		return err
 	}
 	if err = queueLabelSync(ctx, tx, w); err != nil {

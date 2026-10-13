@@ -43,13 +43,64 @@ func validateReviewPlanReport(output json.RawMessage) error {
 	return nil
 }
 
-func (e *Engine) triage(ctx context.Context, w *domain.Workflow) error {
-	var report struct {
-		Decision, Title, Description, Risk string
-		Criteria                           []domain.Criterion `json:"criteria"`
-		NonGoals                           []string           `json:"non_goals"`
-		Questions                          []string           `json:"questions"`
+type triageReport struct {
+	Decision    string             `json:"decision"`
+	Title       string             `json:"title"`
+	Description string             `json:"description"`
+	Risk        string             `json:"risk"`
+	Criteria    []domain.Criterion `json:"criteria"`
+	NonGoals    []string           `json:"non_goals"`
+	Questions   []string           `json:"questions"`
+}
+
+func applyTriageReport(w *domain.Workflow, report triageReport, requireAcceptForDevelopment bool) error {
+	switch report.Decision {
+	case "accepted":
+		if strings.TrimSpace(report.Title) == "" || strings.TrimSpace(report.Description) == "" || len(report.Criteria) == 0 {
+			return errors.New("accepted triage report requires a title, description, and acceptance criteria")
+		}
+		seen := map[string]bool{}
+		for _, c := range report.Criteria {
+			if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Description) == "" || seen[c.ID] {
+				return errors.New("triage acceptance criteria invalid")
+			}
+			seen[c.ID] = true
+		}
+		proposal := domain.Spec{Revision: w.Spec.Revision + 1, Title: report.Title, Description: report.Description, Criteria: report.Criteria, NonGoals: report.NonGoals, Risk: report.Risk, SourceHash: normalizedIssueHash(w.IssueBody)}
+		proposal.Digest = domain.SpecDigest(proposal)
+		if requireAcceptForDevelopment {
+			w.ProposalSpec = &proposal
+			w.Phase = "SPEC_READY"
+			w.LastError = "Review the proposed specification and post /ai accept to approve it and start development"
+			return nil
+		}
+		proposal.Approved = true
+		proposal.ApprovedBy = "ai:dev-triage"
+		proposal.Digest = domain.SpecDigest(proposal)
+		w.Spec = proposal
+		w.ProposalSpec = nil
+		w.Phase = "PLANNING"
+		w.LastError = ""
+	case "needs_info":
+		w.ProposalSpec = nil
+		w.Phase = "NEEDS_INFO"
+		w.LastError = strings.Join(report.Questions, "\n")
+	case "rejected":
+		w.ProposalSpec = nil
+		w.Phase = "REJECT_PROPOSED"
+		w.LastError = ""
+	case "deferred":
+		w.ProposalSpec = nil
+		w.Phase = "DEFERRED"
+		w.LastError = ""
+	default:
+		return errors.New("unsupported triage decision")
 	}
+	return nil
+}
+
+func (e *Engine) triage(ctx context.Context, w *domain.Workflow) error {
+	var report triageReport
 	if e.Config().Runner.Mode == "fake" {
 		if !strings.HasPrefix(w.IssueTitle, "Fixture:") {
 			return errors.New("Fake runner only accepts the documented Fixture: repair Add task")
@@ -74,41 +125,8 @@ func (e *Engine) triage(ctx context.Context, w *domain.Workflow) error {
 			return err
 		}
 	}
-	proposed := domain.Spec{Revision: w.Spec.Revision + 1, Title: report.Title, Description: report.Description, Criteria: report.Criteria, NonGoals: report.NonGoals, Risk: report.Risk, SourceHash: normalizedIssueHash(w.IssueBody)}
-	if len(report.Criteria) == 0 && report.Decision == "accepted" {
-		return errors.New("triage omitted acceptance criteria")
-	}
-	seen := map[string]bool{}
-	for _, c := range report.Criteria {
-		if c.ID == "" || c.Description == "" || seen[c.ID] {
-			return errors.New("triage acceptance criteria invalid")
-		}
-		seen[c.ID] = true
-	}
-	proposed.Digest = domain.SpecDigest(proposed)
-	w.ProposalSpec = &proposed
-	switch report.Decision {
-	case "accepted":
-		w.Phase = "SPEC_READY"
-		w.LastError = "Review the proposed TaskSpec and post /ai accept to approve it"
-		if e.Config().Runner.Mode == "fake" {
-			w.Spec = proposed
-			w.ProposalSpec = nil
-			w.Spec.Approved = true
-			w.Spec.ApprovedBy = w.AuthorizedBy
-			w.Spec.Digest = domain.SpecDigest(w.Spec)
-			w.Phase = "PLANNING"
-			w.LastError = ""
-		}
-	case "needs_info":
-		w.Phase = "NEEDS_INFO"
-		w.LastError = strings.Join(report.Questions, "\n")
-	case "rejected":
-		w.Phase = "REJECT_PROPOSED"
-	case "deferred":
-		w.Phase = "DEFERRED"
-	default:
-		return errors.New("unsupported triage decision")
+	if err := applyTriageReport(w, report, e.Config().Runner.RequireAcceptForDevelopment); err != nil {
+		return err
 	}
 	return e.Store.Save(ctx, w, statusAction(*w))
 }

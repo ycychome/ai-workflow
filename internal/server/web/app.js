@@ -612,7 +612,7 @@
       issue: true,
       eligibility: stage >= 2 && phase !== "WAITING_CONFIGURATION",
       triage: stage >= 3 || ["NEEDS_INFO", "REJECT_PROPOSED", "REJECTED", "DEFERRED"].includes(phase),
-      spec: Boolean(w.spec?.approved),
+      spec: Boolean(w.spec?.approved) && phase !== "SPEC_READY",
       plan: stage >= 5,
       build: stage >= 6,
       integrate: stage >= 6 && phase !== "CHANGES_REQUESTED",
@@ -653,6 +653,7 @@
     if (node === "needs-info" && phase === "NEEDS_INFO") status = control === "ACTIVE" ? "active" : "paused";
     if (node === "fix" && phase === "CHANGES_REQUESTED") status = control === "ACTIVE" ? "active" : control === "PAUSED" ? "paused" : "pending";
     if (node === "merged" && phase === "MERGED") status = "done";
+    if (node === "spec" && phase === "SPEC_READY") status = "human";
     if (cancelled && !completedByStage[node] && node === currentNode) status = "cancelled";
     if ((terminalProposal || terminalStopped) && !["issue", "eligibility", "triage", "maintainer-review", "maintainer"].includes(node)) status = "pending";
     if (gatePassed && node === "gate") status = "done";
@@ -736,7 +737,10 @@
       core: { x: 82, y: 116, width: 456, height: 42, label: "Gateway · Orchestrator · Policy", detail: "Eligibility · 受控 Publisher · 状态 / 取消", status: "context" },
       eligibility: { x: 20, y: 256, width: 126, height: 60, label: "Eligibility Gate", detail: "授权 / 入队资格", status: "eligibility", tab: "overview" },
       triage: { x: 166, y: 256, width: 126, height: 60, label: "Dev Triage", detail: phase === "NEEDS_INFO" ? "等待需求补充" : "必要性 / 可行性", status: "triage", tab: "overview" },
-      spec: { x: 312, y: 256, width: 126, height: 60, label: "批准 TaskSpec", detail: w.spec?.approved ? "已批准" : w.proposal_spec ? "提案待批准" : "等待决策", status: "spec", tab: "overview" },
+      spec: { x: 312, y: 256, width: 126, height: 60,
+        label: w.phase === "SPEC_READY" ? "等待人工接受" : w.spec?.approved_by === "ai:dev-triage" ? "AI 批准需求" : "需求审批",
+        detail: w.phase === "SPEC_READY" ? "接受后进入开发" : w.spec?.approved_by === "ai:dev-triage" ? "AI 已完成需求批准" : w.spec?.approved ? "维护者已接受" : w.proposal_spec ? "AI 提案待确认" : "等待需求分析",
+        status: "spec", tab: "overview" },
       planner: { x: 458, y: 256, width: 126, height: 60, label: "Dev Planner + DAG", detail: `${(w.tasks || []).length} 项任务 / 依赖`, status: "plan", tab: "development" },
       builder: { x: 458, y: 382, width: 126, height: 60, label: "Builder Pool", detail: "独立 clone / 低权限", status: "build", tab: "development" },
       integrate: { x: 312, y: 382, width: 126, height: 60, label: "产物校验 / 集成", detail: "真实 diff · 串行验证", status: "integrate", tab: "evidence" },
@@ -1006,19 +1010,22 @@
 
   function proposalApprovalCard(w) {
     const section = el("section", "approval-card");
-    section.append(el("div", "approval-heading", "规格审批"));
+    const aiApproved = w.spec?.approved_by === "ai:dev-triage";
+    const waitingForManualAccept = w.phase === "SPEC_READY" && Boolean(w.proposal_spec);
+    section.append(el("div", "approval-heading", waitingForManualAccept ? "等待人工接受需求" : aiApproved ? "AI 已批准需求" : "需求处理状态"));
     const canApprove = canAcceptProposal(w);
     if (w.phase === "SPEC_READY" && w.proposal_spec) {
-      section.append(el("p", "", "确认提案规格后，工作流才会进入开发计划。"));
+      section.append(el("p", "", "AI 已完成需求分析。确认下面的提案后，工作流进入开发计划。"));
       const proposal = el("div", "proposal-content");
       proposal.append(el("h4", "", text(w.proposal_spec.title, "未命名方案")), el("p", "", text(w.proposal_spec.description, "暂无方案说明")));
       proposal.append(el("strong", "subsection-title", "验收标准"), criteriaList(w.proposal_spec));
       if (w.proposal_spec.non_goals?.length) proposal.append(el("p", "", `非目标：${w.proposal_spec.non_goals.join("；")}`));
       section.append(proposal);
     } else if (w.spec?.approved) {
-      section.append(el("p", "", `已批准规格：${text(w.spec.title, "未命名规格")}。普通的“批准进入开发”仅适用于待确认方案阶段。`));
+      const approvalSource = aiApproved ? "AI 已完成需求批准" : `需求已由 ${text(w.spec.approved_by, "维护者")} 接受`;
+      section.append(el("p", "", `${approvalSource}。当前需求：${text(w.spec.title, "未命名规格")}。`));
     } else {
-      section.append(el("p", "", "当前没有可批准的完整提案。需求分析与规格审批是两个独立步骤。"));
+      section.append(el("p", "", "当前没有待接受的完整需求提案。需求分析与需求接受是两个独立步骤。"));
     }
     const button = el("button", "command-button primary", "批准进入开发");
     button.type = "button";
@@ -1264,6 +1271,7 @@
     if (form.elements.stream) form.elements.stream.checked = Boolean(model.stream);
     if (form.elements.mode && runner.mode) form.elements.mode.value = runner.mode;
     if (form.elements.require_accept_for_analysis) form.elements.require_accept_for_analysis.checked = Boolean(runner.require_accept_for_analysis);
+    if (form.elements.require_accept_for_development) form.elements.require_accept_for_development.checked = Boolean(runner.require_accept_for_development);
     for (const name of ["workflow_concurrency", "builders", "reviewers", "attempt_minutes"]) {
       if (form.elements[name] && runner[name] !== undefined) form.elements[name].value = runner[name];
     }
@@ -1336,6 +1344,7 @@
           mode: form.elements.mode.value,
           workflow_concurrency: workflowConcurrency,
           require_accept_for_analysis: form.elements.require_accept_for_analysis.checked,
+          require_accept_for_development: form.elements.require_accept_for_development.checked,
           builders: formNumber(form, "builders"),
           reviewers: formNumber(form, "reviewers"),
           attempt_minutes: formNumber(form, "attempt_minutes")

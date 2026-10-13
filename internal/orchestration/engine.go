@@ -103,6 +103,11 @@ func (e *Engine) SetConfig(ctx context.Context, c config.Config) error {
 			})
 		}
 	}
+	if old.Runner.RequireAcceptForDevelopment && !c.Runner.RequireAcceptForDevelopment {
+		if err := e.releaseAcceptedSpecs(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 func (e *Engine) App() (*gh.Client, error) {
@@ -136,6 +141,9 @@ func (e *Engine) client(ctx context.Context, w domain.Workflow) (*gh.Installatio
 	return a.ForInstallation(ctx, w.InstallationID), parts[0], parts[1], nil
 }
 func (e *Engine) Run(ctx context.Context) {
+	if err := e.releaseAcceptedSpecs(ctx); err != nil {
+		slog.Warn("release AI-approved requirements", "error", err)
+	}
 	go e.inboxLoop(ctx)
 	go e.outboxLoop(ctx)
 	go e.labelLoop(ctx)

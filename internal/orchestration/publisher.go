@@ -61,11 +61,11 @@ func statusBody(w domain.Workflow) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**AI workflow status:** `%s` · control `%s` · generation `%d`", w.Phase, w.Control, w.Generation)
 	if w.Phase == "NEEDS_INFO" && w.Control == "ACTIVE" {
-		b.WriteString("\n\n**下一步：** 维护者直接在本 Issue 回复补充信息即可，无需 @ bot。收到回复后会重新分析；回复不会自动批准开发规格。")
+		b.WriteString("\n\n**下一步：** 维护者直接在本 Issue 回复补充信息即可，无需 @ bot。收到回复后会重新分析；AI 同意后按开发接受策略自动进入开发或等待 `/ai accept`。")
 	} else if w.Phase == "INTAKE" {
-		b.WriteString("\n\n**下一步：** 检查 Issue 请求并评论 `/ai analyze`（或在控制台开始分析）。这只会生成待审规格；必须随后 `/ai accept` 才会批准规格并进入开发。")
+		b.WriteString("\n\n**下一步：** 检查 Issue 请求并评论 `/ai analyze`（或在控制台开始分析）。AI 同意后默认自动批准规格并进入开发；开启开发前手动接受时才需再评论 `/ai accept`。")
 	} else if w.Phase == "SPEC_READY" {
-		b.WriteString("\n\n**下一步：** 检查下方提议的规格和验收条件，`/ai accept`（或控制台接受）会明确批准此规格并开始开发。分析不会自动批准。")
+		b.WriteString("\n\n**下一步：** AI 已同意执行。当前启用了开发前手动接受：检查下方规格和验收条件后，用 `/ai accept`（或控制台接受）进入开发。")
 	}
 	if w.LastError != "" {
 		fmt.Fprintf(&b, "\n\n%s", w.LastError)
@@ -78,6 +78,9 @@ func statusBody(w domain.Workflow) string {
 		if len(w.ForceApproval.Bypassed) > 0 {
 			fmt.Fprintf(&b, " Bypassed: %s.", strings.Join(w.ForceApproval.Bypassed, "; "))
 		}
+	}
+	if w.Spec.Approved && w.Spec.ApprovedBy == "ai:dev-triage" {
+		b.WriteString("\n\n**需求审批：** AI 已批准当前规格，自动进入开发。最终合并仍由维护者决定。")
 	}
 	if w.Spec.Title != "" && w.Spec.Approved {
 		fmt.Fprintf(&b, "\n\n**Accepted specification:** %s\n\n%s", w.Spec.Title, w.Spec.Description)
