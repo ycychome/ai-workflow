@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download \
     && chmod -R a+rX /go/pkg/mod
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates postgresql-client \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 worker \
     && useradd --uid 10001 --gid 10001 --create-home --shell /bin/sh worker \

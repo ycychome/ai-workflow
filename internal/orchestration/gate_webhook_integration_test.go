@@ -97,6 +97,8 @@ func TestGateIdentityAndPublishWebhookPostgresIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		mock.setPR(gateMockPR(w), nil)
+		mock.setArchive(w.BaseSHA, map[string]string{"file.txt": "old"})
+		mock.setArchive(w.HeadSHA, map[string]string{"file.txt": "new"})
 		a := enqueueAndStartGate(t, ctx, s, w)
 		d := gateActionData{Pass: true, Reason: "all checks passed", Key: w.Review.Key, SHA: w.HeadSHA}
 		receipt, err, unknown := e.publishGate(ctx, w, a, d)
@@ -164,6 +166,8 @@ func TestGateIdentityAndPublishWebhookPostgresIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		mock.setPR(gateMockPR(w), nil)
+		mock.setArchive(w.BaseSHA, map[string]string{"file.txt": "old"})
+		mock.setArchive(w.HeadSHA, map[string]string{"file.txt": "new"})
 		a := enqueueAndStartGate(t, ctx, s, w)
 		d := gateActionData{Pass: true, Reason: "all checks passed", Key: "wrong-key", SHA: w.HeadSHA}
 		_, err, _ := e.publishGate(ctx, w, a, d)
@@ -192,6 +196,8 @@ func TestGateIdentityAndPublishWebhookPostgresIntegration(t *testing.T) {
 		changed := gateMockPR(w)
 		changed.Base.SHA = "raced-base"
 		mock.setPR(valid, []gh.PullRequest{valid, valid, changed})
+		mock.setArchive(w.BaseSHA, map[string]string{"file.txt": "old"})
+		mock.setArchive(w.HeadSHA, map[string]string{"file.txt": "new"})
 		a := enqueueAndStartGate(t, ctx, s, w)
 		d := gateActionData{Pass: true, Reason: "all checks passed", Key: w.Review.Key, SHA: w.HeadSHA}
 		_, err, _ := e.publishGate(ctx, w, a, d)
@@ -217,6 +223,7 @@ func TestGateIdentityAndPublishWebhookPostgresIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		d := publishActionData{Changes: []gh.FileChange{{Path: "file.txt", Content: []byte("new"), Mode: "100644"}}, TaskIDs: []string{"T1"}, Message: "finish T1", ExpectedParent: w.HeadSHA, BaseBranch: w.BaseBranch, BaseSHA: w.BaseSHA, Branch: w.Branch}
+		attachPublishIntegrationFixture(t, ctx, s, &w, &d, "tree-published")
 		a := store.NewAction(w, "publish", d)
 		if err := s.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) { return []store.Action{a}, nil }); err != nil {
 			t.Fatal(err)
@@ -264,6 +271,7 @@ func TestGateIdentityAndPublishWebhookPostgresIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		d := publishActionData{Changes: []gh.FileChange{{Path: "file.txt", Content: []byte("new"), Mode: "100644"}}, TaskIDs: []string{"T1"}, Message: "finish T1", ExpectedParent: w.HeadSHA, BaseBranch: w.BaseBranch, BaseSHA: w.BaseSHA, Branch: w.Branch}
+		attachPublishIntegrationFixture(t, ctx, s, &w, &d, "tree-published")
 		a := store.NewAction(w, "publish", d)
 		if err := s.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) { return []store.Action{a}, nil }); err != nil {
 			t.Fatal(err)
@@ -332,6 +340,7 @@ func gateIdentityFixture(e *Engine, issue int) domain.Workflow {
 	w.Spec = domain.Spec{Title: "Requirement", Description: "Verify candidate", Criteria: []domain.Criterion{{ID: "AC-1", Description: "candidate is current"}}, Approved: true, ApprovedBy: "ai:dev-triage"}
 	w.Spec.Digest = domain.SpecDigest(w.Spec)
 	w.Review = domain.Review{ID: fmt.Sprintf("review-%d", issue), VerificationPassed: true, SkepticComplete: true, Verdict: "PASS", Obligations: []domain.Obligation{{ID: "O-1", CriterionID: "AC-1", Result: "satisfied", Evidence: []string{"evidence-1"}}}}
+	w.Review.Tasks = []domain.Task{{ID: "reviewer-1", Status: "ACCEPTED", ObligationIDs: []string{"O-1"}}, {ID: "skeptic", Status: "ACCEPTED"}}
 	w.Review.Key = e.key(context.Background(), w)
 	return w
 }

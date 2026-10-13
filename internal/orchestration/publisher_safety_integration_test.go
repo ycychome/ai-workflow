@@ -49,7 +49,7 @@ func TestRemoteReadyReceiptCreatesAndPublishesManualGate(t *testing.T) {
 	}))
 	defer server.Close()
 	e.app = safetyGitHubClient(t, server.URL, server.Client())
-	e.cfg.Repositories = []config.Repository{{Name: "acme/pilot", ID: 77, BaseBranch: "main", Verification: [][]string{{"go", "test", "./..."}}, PolicyVersion: "safety-test"}}
+	e.cfg.Repositories = []config.Repository{{Name: "acme/pilot", ID: 77, BaseBranch: "main", AllowedPaths: []string{"file.txt"}, Verification: [][]string{{"go", "test", "./..."}}, PolicyVersion: "safety-test"}}
 	w := gateIdentityFixture(e, 201)
 	w.Phase = "BLOCKED"
 	w.Control = "PAUSED"
@@ -63,6 +63,8 @@ func TestRemoteReadyReceiptCreatesAndPublishesManualGate(t *testing.T) {
 	pr.Draft = true
 	pr.NodeID = "node"
 	mock.setPR(pr, nil)
+	mock.setArchive(w.BaseSHA, map[string]string{"file.txt": "old"})
+	mock.setArchive(w.HeadSHA, map[string]string{"file.txt": "new"})
 	if err := e.Command(ctx, w.ID, "maintainer", "/ai forceaccept merge", true); err != nil {
 		t.Fatal(err)
 	}

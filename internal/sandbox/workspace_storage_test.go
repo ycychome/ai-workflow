@@ -81,34 +81,19 @@ func TestDestroyDeadlinePreservesHandleForCleanupRetry(t *testing.T) {
 	}
 }
 
-func TestRecoverRemovesKeepersAndVolumesWithManagedLabels(t *testing.T) {
-	// This is a fake Docker binary: never call real Recover alongside the
-	// user's running supervisor, whose workspaces carry the same labels.
+func TestRecoverRejectsUnscopedCleanup(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "docker")
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$0.calls"
-case "$*" in
-  'ps -aq --filter label=ai-workflow.managed=1') printf 'worker-id\nkeeper-id\n' ;;
-  'volume ls -q --filter label=ai-workflow.managed=1') echo bounded-volume ;;
-esac
-`
-	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf called > \"$0.calls\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	m, err := NewManager(Options{DockerBinary: fake})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Recover(context.Background()); err != nil {
-		t.Fatal(err)
+	if err = m.Recover(context.Background()); err == nil {
+		t.Fatal("unscoped recovery must be refused")
 	}
-	calls, err := os.ReadFile(fake + ".calls")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"rm -f worker-id", "rm -f keeper-id", "ps -aq --filter volume=bounded-volume", "volume rm bounded-volume"} {
-		if !strings.Contains(string(calls), want) {
-			t.Fatalf("missing recovery step %q: %s", want, calls)
-		}
+	if _, err = os.Stat(fake + ".calls"); !os.IsNotExist(err) {
+		t.Fatal("unscoped recovery invoked docker")
 	}
 }

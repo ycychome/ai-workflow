@@ -164,7 +164,7 @@ func TestForceCommandsPostgresIntegration(t *testing.T) {
 		ManualOverride bool   `json:"manual_override"`
 		Reason         string `json:"reason"`
 	}
-	if err := json.Unmarshal(gateData, &gate); err != nil || !gate.Pass || !gate.ManualOverride || !strings.Contains(gate.Reason, "MANUAL OVERRIDE") {
+	if err := json.Unmarshal(gateData, &gate); err != nil || !gate.Pass || !gate.ManualOverride || !strings.Contains(gate.Reason, "人工越过") {
 		t.Fatalf("gate outbox action must carry explicit manual override: %v", err)
 	}
 	child := setPrePRActionRunning(t, ctx, s, ready.ID+":after-ready:gate")

@@ -36,8 +36,12 @@ type Config struct {
 		Mode                        string `yaml:"mode"`
 		Image                       string `yaml:"image"`
 		WorkspaceBytes              int64  `yaml:"workspace_bytes"`
-		Builders                    int    `yaml:"builders"`
-		Reviewers                   int    `yaml:"reviewers"`
+		Builders                    int    `yaml:"builders"`  // Deprecated: fallback for agent_concurrency.
+		Reviewers                   int    `yaml:"reviewers"` // Deprecated: fallback for agent_concurrency.
+		AgentConcurrency            int    `yaml:"agent_concurrency"`
+		WorkflowAgentConcurrency    int    `yaml:"workflow_agent_concurrency"`
+		MaxTasksPerWorkflow         int    `yaml:"max_tasks_per_workflow"`
+		MaxEvidenceRequests         int    `yaml:"max_evidence_requests"`
 		WorkflowConcurrency         int    `yaml:"workflow_concurrency"`
 		RequireAcceptForAnalysis    bool   `yaml:"require_accept_for_analysis"`
 		RequireAcceptForDevelopment bool   `yaml:"require_accept_for_development"`
@@ -55,14 +59,17 @@ type Config struct {
 	Repositories []Repository `yaml:"repositories"`
 }
 type Repository struct {
-	Name           string     `yaml:"name"`
-	ID             int64      `yaml:"id"`
-	BaseBranch     string     `yaml:"base_branch"`
-	Maintainers    []string   `yaml:"maintainers"`
-	AllowedPaths   []string   `yaml:"allowed_paths"`
-	ProtectedPaths []string   `yaml:"protected_paths"`
-	Verification   [][]string `yaml:"verification"`
-	PolicyVersion  string     `yaml:"policy_version"`
+	Epoch                string     `yaml:"epoch"`
+	TrustedCI            *TrustedCI `yaml:"trusted_ci,omitempty"`
+	Name                 string     `yaml:"name"`
+	ID                   int64      `yaml:"id"`
+	BaseBranch           string     `yaml:"base_branch"`
+	Maintainers          []string   `yaml:"maintainers"`
+	AllowedPaths         []string   `yaml:"allowed_paths"`
+	ProtectedPaths       []string   `yaml:"protected_paths"`
+	Verification         [][]string `yaml:"verification"`
+	VerificationServices []string   `yaml:"verification_services"`
+	PolicyVersion        string     `yaml:"policy_version"`
 }
 
 func Load(path string) (Config, error) {
@@ -73,6 +80,8 @@ func Load(path string) (Config, error) {
 	c.Runner.Builders = 2
 	c.Runner.Reviewers = 2
 	c.Runner.WorkflowConcurrency = 2
+	c.Runner.MaxTasksPerWorkflow = 64
+	c.Runner.MaxEvidenceRequests = 64
 	c.Runner.AttemptMinutes = 30
 	c.Model.Stream = true
 	c.Model.MaxOutputTokens = 8192
@@ -89,7 +98,11 @@ func Load(path string) (Config, error) {
 	// A filesystem capacity must be an exact integral number of bytes.
 	var rawQuota struct {
 		Runner struct {
-			WorkspaceBytes any `yaml:"workspace_bytes"`
+			WorkspaceBytes           any `yaml:"workspace_bytes"`
+			AgentConcurrency         any `yaml:"agent_concurrency"`
+			WorkflowAgentConcurrency any `yaml:"workflow_agent_concurrency"`
+			MaxTasksPerWorkflow      any `yaml:"max_tasks_per_workflow"`
+			MaxEvidenceRequests      any `yaml:"max_evidence_requests"`
 		} `yaml:"runner"`
 	}
 	if err = yaml.Unmarshal(b, &rawQuota); err != nil {
@@ -102,8 +115,24 @@ func Load(path string) (Config, error) {
 			return c, errors.New("runner.workspace_bytes must be an integer number of bytes")
 		}
 	}
+	for name, value := range map[string]any{"agent_concurrency": rawQuota.Runner.AgentConcurrency, "workflow_agent_concurrency": rawQuota.Runner.WorkflowAgentConcurrency, "max_tasks_per_workflow": rawQuota.Runner.MaxTasksPerWorkflow, "max_evidence_requests": rawQuota.Runner.MaxEvidenceRequests} {
+		if value == nil {
+			continue
+		}
+		switch value.(type) {
+		case int, int64, uint64:
+		default:
+			return c, errors.New("runner." + name + " must be a positive integer")
+		}
+	}
 	if err = yaml.Unmarshal(b, &c); err != nil {
 		return c, err
+	}
+	if rawQuota.Runner.AgentConcurrency == nil {
+		c.Runner.AgentConcurrency = c.Runner.Builders + c.Runner.Reviewers
+	}
+	if rawQuota.Runner.WorkflowAgentConcurrency == nil {
+		c.Runner.WorkflowAgentConcurrency = max(c.Runner.Builders, c.Runner.Reviewers)
 	}
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		c.DatabaseURL = v
@@ -117,8 +146,14 @@ func Load(path string) (Config, error) {
 	if c.DatabaseURL == "" {
 		return c, errors.New("database_url or DATABASE_URL is required")
 	}
-	if c.Runner.Builders < 1 || c.Runner.Builders > 2 || c.Runner.Reviewers < 1 || c.Runner.Reviewers > 2 {
-		return c, errors.New("MVP allows 1 or 2 builders/reviewers")
+	if c.Runner.Builders < 1 || c.Runner.Reviewers < 1 {
+		return c, errors.New("deprecated builders/reviewers must be positive")
+	}
+	if c.Runner.AgentConcurrency < 1 || c.Runner.WorkflowAgentConcurrency < 1 || c.Runner.WorkflowAgentConcurrency > c.Runner.AgentConcurrency {
+		return c, errors.New("agent concurrency must be positive and workflow_agent_concurrency must not exceed agent_concurrency")
+	}
+	if c.Runner.MaxTasksPerWorkflow < 1 || c.Runner.MaxEvidenceRequests < 1 {
+		return c, errors.New("task and evidence limits must be positive")
 	}
 	if !ValidWorkspaceBytes(c.Runner.WorkspaceBytes) {
 		return c, errors.New("runner.workspace_bytes must be between 1 and 8589934592 bytes (8 GiB)")
@@ -134,6 +169,11 @@ func Load(path string) (Config, error) {
 	}
 	for i := range c.Repositories {
 		r := &c.Repositories[i]
+		for _, service := range r.VerificationServices {
+			if service != "postgres" {
+				return c, errors.New("unsupported verification service: " + service)
+			}
+		}
 		if r.BaseBranch == "" {
 			r.BaseBranch = "main"
 		}
@@ -191,3 +231,43 @@ func (c Config) EffectiveWorkspaceBytes() int64 {
 }
 
 func ValidWorkspaceBytes(n int64) bool { return n > 0 && n <= MaxWorkspaceBytes }
+
+// Effective methods also support programmatic configs that omit new fields.
+func (c Config) EffectiveAgentConcurrency() int {
+	if c.Runner.AgentConcurrency != 0 {
+		return c.Runner.AgentConcurrency
+	}
+	if c.Runner.Builders > 0 || c.Runner.Reviewers > 0 {
+		return max(1, c.Runner.Builders) + max(1, c.Runner.Reviewers)
+	}
+	return 4
+}
+func (c Config) EffectiveWorkflowAgentConcurrency() int {
+	if c.Runner.WorkflowAgentConcurrency != 0 {
+		return c.Runner.WorkflowAgentConcurrency
+	}
+	if c.Runner.Builders > 0 || c.Runner.Reviewers > 0 {
+		return max(c.Runner.Builders, c.Runner.Reviewers)
+	}
+	return 2
+}
+func (c Config) EffectiveMaxTasksPerWorkflow() int {
+	if c.Runner.MaxTasksPerWorkflow != 0 {
+		return c.Runner.MaxTasksPerWorkflow
+	}
+	return 64
+}
+func (c Config) EffectiveMaxEvidenceRequests() int {
+	if c.Runner.MaxEvidenceRequests != 0 {
+		return c.Runner.MaxEvidenceRequests
+	}
+	return 64
+}
+
+// EffectiveEpoch preserves existing installations until an explicit reset.
+func (r Repository) EffectiveEpoch() string {
+	if r.Epoch == "" {
+		return "legacy"
+	}
+	return r.Epoch
+}

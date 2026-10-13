@@ -46,9 +46,11 @@ type pendingState struct{ expires time.Time }
 
 type workflowStateView struct {
 	domain.Workflow
-	Scheduling               store.Scheduling `json:"scheduling"`
-	ForceApprovalCurrent     bool             `json:"force_approval_current"`
-	IssueMatchesApprovedSpec bool             `json:"issue_matches_approved_spec"`
+	AgentRuns                []domain.AgentRun `json:"agent_runs"`
+	AgentQueue               agentQueueSummary `json:"agent_queue"`
+	Scheduling               store.Scheduling  `json:"scheduling"`
+	ForceApprovalCurrent     bool              `json:"force_approval_current"`
+	IssueMatchesApprovedSpec bool              `json:"issue_matches_approved_spec"`
 }
 
 // Handlers owns the two HTTP surfaces used by the control process.
@@ -151,23 +153,23 @@ func (h *Handlers) login(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
-		writeError(w, http.StatusBadRequest, "token is required")
+		writeError(w, http.StatusBadRequest, "必须提供访问令牌")
 		return
 	}
 	expected, err := os.ReadFile(h.tokenPath)
 	if err != nil || len(strings.TrimSpace(string(expected))) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "dashboard token is not configured")
+		writeError(w, http.StatusServiceUnavailable, "尚未配置控制台访问令牌")
 		return
 	}
 	gotHash := sha256.Sum256([]byte(strings.TrimSpace(body.Token)))
 	wantHash := sha256.Sum256([]byte(strings.TrimSpace(string(expected))))
 	if subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) != 1 {
-		writeError(w, http.StatusUnauthorized, "invalid dashboard token")
+		writeError(w, http.StatusUnauthorized, "控制台访问令牌无效")
 		return
 	}
 	value, sessionID, err := h.newSession()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create session")
+		writeError(w, http.StatusInternalServerError, "无法创建登录会话")
 		return
 	}
 	h.mu.Lock()
@@ -239,7 +241,7 @@ func (h *Handlers) checkOrigin(r *http.Request) error {
 		expectedScheme = "https"
 	}
 	if err != nil || u.Scheme != expectedScheme || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
-		return errors.New("cross-origin request rejected")
+		return errors.New("跨站请求已被拒绝")
 	}
 	return nil
 }
@@ -250,7 +252,7 @@ func (h *Handlers) dashboardAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := h.sessionID(r); !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		writeError(w, http.StatusUnauthorized, "请先登录")
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -258,6 +260,14 @@ func (h *Handlers) dashboardAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/pilot/maintenance/") {
+		h.pilotMaintenance(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/evaluation/") {
+		h.evaluationAPI(w, r)
+		return
 	}
 	switch r.URL.Path {
 	case "/api/state":
@@ -275,11 +285,19 @@ func (h *Handlers) dashboardAPI(w http.ResponseWriter, r *http.Request) {
 	case "/api/github/discover":
 		h.discover(w, r)
 	default:
+		if strings.HasPrefix(r.URL.Path, "/api/workflows/") && strings.HasSuffix(r.URL.Path, "/risk-preview") {
+			h.riskPreview(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/workflows/") && strings.HasSuffix(r.URL.Path, "/commands") {
 			h.command(w, r)
 			return
 		}
-		writeError(w, http.StatusNotFound, "unknown API endpoint")
+		if strings.HasPrefix(r.URL.Path, "/api/workflows/") {
+			h.workflowDetail(w, r)
+			return
+		}
+		writeError(w, http.StatusNotFound, "未知 API 地址")
 	}
 }
 
@@ -290,7 +308,7 @@ func (h *Handlers) evidence(w http.ResponseWriter, r *http.Request) {
 	}
 	wf, err := h.engine.Store.Get(r.Context(), r.URL.Query().Get("workflow_id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "workflow was not found")
+		writeError(w, http.StatusNotFound, "未找到工作流")
 		return
 	}
 	for _, ev := range wf.Evidence {
@@ -299,29 +317,29 @@ func (h *Handlers) evidence(w http.ResponseWriter, r *http.Request) {
 		}
 		file, err := filepath.Abs(ev.Path)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid evidence path")
+			writeError(w, http.StatusBadRequest, "证据路径无效")
 			return
 		}
 		base, err := filepath.Abs(filepath.Join(h.engine.Config().DataDir, "evidence", wf.ID))
 		if err != nil || !strings.HasPrefix(file, base+string(filepath.Separator)) {
-			writeError(w, http.StatusForbidden, "evidence is outside the workflow store")
+			writeError(w, http.StatusForbidden, "证据不在该工作流存储范围内")
 			return
 		}
 		f, err := os.Open(file)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "evidence file is unavailable")
+			writeError(w, http.StatusNotFound, "证据文件不可用")
 			return
 		}
 		defer f.Close()
 		b, err := io.ReadAll(io.LimitReader(f, 256<<10))
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not read evidence")
+			writeError(w, http.StatusInternalServerError, "无法读取证据")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"evidence": ev, "content": string(b)})
 		return
 	}
-	writeError(w, http.StatusNotFound, "evidence ID was not recorded for this workflow")
+	writeError(w, http.StatusNotFound, "该工作流未记录此证据 ID")
 }
 
 func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
@@ -333,18 +351,31 @@ func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	workflows, err := h.engine.Store.ListRecent(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load workflows")
+		writeError(w, http.StatusInternalServerError, "无法加载工作流")
 		return
 	}
-	cfg := h.engine.Config()
+	cfg, err := h.engine.ExecutionConfig(ctx)
+	if err != nil {
+		writeError(w, 503, "无法读取实际并发限额")
+		return
+	}
 	workflowLimit := cfg.Runner.WorkflowConcurrency
 	if workflowLimit == 0 {
 		workflowLimit = 2
 	}
 	scheduling, err := h.engine.Store.SchedulingFor(ctx, workflows, workflowLimit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load workflow scheduling metadata")
+		writeError(w, http.StatusInternalServerError, "无法加载工作流调度状态")
 		return
+	}
+	allRuns, err := h.engine.Store.ListAgentRuns(ctx, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取智能体队列")
+		return
+	}
+	runsByWorkflow := make(map[string][]domain.AgentRun)
+	for _, run := range allRuns {
+		runsByWorkflow[run.WorkflowID] = append(runsByWorkflow[run.WorkflowID], run)
 	}
 	maxGeneration := int64(0)
 	views := make([]workflowStateView, 0, len(workflows))
@@ -352,9 +383,13 @@ func (h *Handlers) state(w http.ResponseWriter, r *http.Request) {
 		if wf.Generation > maxGeneration {
 			maxGeneration = wf.Generation
 		}
-		views = append(views, workflowStateView{Workflow: wf, Scheduling: scheduling[wf.ID], ForceApprovalCurrent: h.engine.ForceApprovalCurrent(ctx, wf), IssueMatchesApprovedSpec: h.engine.IssueMatchesApprovedSpec(wf)})
+		runs := runsByWorkflow[wf.ID]
+		if runs == nil {
+			runs = []domain.AgentRun{}
+		}
+		views = append(views, workflowStateView{Workflow: wf, AgentRuns: runs, AgentQueue: summarizeAgentQueue(runs, cfg.EffectiveWorkflowAgentConcurrency()), Scheduling: scheduling[wf.ID], ForceApprovalCurrent: h.engine.ForceApprovalCurrent(ctx, wf), IssueMatchesApprovedSpec: h.engine.IssueMatchesApprovedSpec(wf)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": views, "health": h.basicHealth(ctx, cfg), "config": publicConfig(cfg), "generation": maxGeneration})
+	writeJSON(w, http.StatusOK, map[string]any{"workflows": views, "agent_queue": summarizeAgentQueue(allRuns, cfg.EffectiveAgentConcurrency()), "prompt_version": agent.PromptVersion, "role_catalog": agent.RoleCatalog(), "health": h.basicHealth(ctx, cfg), "config": publicConfig(cfg), "generation": maxGeneration})
 }
 
 func (h *Handlers) basicHealth(ctx context.Context, cfg config.Config) map[string]any {
@@ -393,7 +428,7 @@ func publicConfig(cfg config.Config) map[string]any {
 	return map[string]any{
 		"github":       map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL, "configured": cfg.GitHub.AppID > 0},
 		"model":        map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-		"runner":       map[string]any{"mode": cfg.Runner.Mode, "image": cfg.Runner.Image, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "require_accept_for_development": cfg.Runner.RequireAcceptForDevelopment, "attempt_minutes": cfg.Runner.AttemptMinutes, "workspace_bytes": cfg.EffectiveWorkspaceBytes()},
+		"runner":       runnerPublicConfig(cfg),
 		"budget":       map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		"repositories": repos,
 	}
@@ -416,6 +451,10 @@ type settingsUpdate struct {
 		Builders                    *int    `json:"builders"`
 		Reviewers                   *int    `json:"reviewers"`
 		WorkflowConcurrency         *int    `json:"workflow_concurrency"`
+		AgentConcurrency            *int    `json:"agent_concurrency"`
+		WorkflowAgentConcurrency    *int    `json:"workflow_agent_concurrency"`
+		MaxTasksPerWorkflow         *int    `json:"max_tasks_per_workflow"`
+		MaxEvidenceRequests         *int    `json:"max_evidence_requests"`
 		RequireAcceptForAnalysis    *bool   `json:"require_accept_for_analysis"`
 		RequireAcceptForDevelopment *bool   `json:"require_accept_for_development"`
 		AttemptMinutes              *int    `json:"attempt_minutes"`
@@ -439,7 +478,7 @@ func (h *Handlers) settings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"github": map[string]any{"app_id": cfg.GitHub.AppID, "installation_id": cfg.GitHub.InstallationID, "public_url": cfg.GitHub.PublicURL},
 			"model":  map[string]any{"base_url": cfg.Model.BaseURL, "dev": cfg.Model.Dev, "review": cfg.Model.Review, "stream": cfg.Model.Stream, "max_output_tokens": cfg.Model.MaxOutputTokens},
-			"runner": map[string]any{"mode": cfg.Runner.Mode, "builders": cfg.Runner.Builders, "reviewers": cfg.Runner.Reviewers, "workflow_concurrency": cfg.Runner.WorkflowConcurrency, "require_accept_for_analysis": cfg.Runner.RequireAcceptForAnalysis, "require_accept_for_development": cfg.Runner.RequireAcceptForDevelopment, "attempt_minutes": cfg.Runner.AttemptMinutes, "workspace_bytes": cfg.EffectiveWorkspaceBytes()},
+			"runner": runnerPublicConfig(cfg),
 			"budget": map[string]any{"issue_calls": cfg.Budget.IssueCalls, "daily_calls": cfg.Budget.DailyCalls, "issue_minutes": cfg.Budget.IssueMinutes, "max_attempts": cfg.Budget.MaxAttempts, "max_fix_rounds": cfg.Budget.MaxFixRounds, "input_price_per_million": cfg.Budget.InputPrice, "output_price_per_million": cfg.Budget.OutputPrice},
 		})
 	case http.MethodPost:
@@ -455,7 +494,7 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&update); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid settings JSON: "+err.Error())
+		writeError(w, http.StatusBadRequest, "设置 JSON 无效："+err.Error())
 		return
 	}
 	cfg := h.engine.Config()
@@ -498,6 +537,34 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if update.Runner.WorkflowConcurrency != nil {
 		cfg.Runner.WorkflowConcurrency = *update.Runner.WorkflowConcurrency
 	}
+	if update.Runner.AgentConcurrency != nil {
+		if *update.Runner.AgentConcurrency < 1 {
+			writeError(w, http.StatusBadRequest, "智能体并发与任务、证据请求限额必须为正整数")
+			return
+		}
+		cfg.Runner.AgentConcurrency = *update.Runner.AgentConcurrency
+	}
+	if update.Runner.WorkflowAgentConcurrency != nil {
+		if *update.Runner.WorkflowAgentConcurrency < 1 {
+			writeError(w, http.StatusBadRequest, "智能体并发与任务、证据请求限额必须为正整数")
+			return
+		}
+		cfg.Runner.WorkflowAgentConcurrency = *update.Runner.WorkflowAgentConcurrency
+	}
+	if update.Runner.MaxTasksPerWorkflow != nil {
+		if *update.Runner.MaxTasksPerWorkflow < 1 {
+			writeError(w, http.StatusBadRequest, "智能体并发与任务、证据请求限额必须为正整数")
+			return
+		}
+		cfg.Runner.MaxTasksPerWorkflow = *update.Runner.MaxTasksPerWorkflow
+	}
+	if update.Runner.MaxEvidenceRequests != nil {
+		if *update.Runner.MaxEvidenceRequests < 1 {
+			writeError(w, http.StatusBadRequest, "智能体并发与任务、证据请求限额必须为正整数")
+			return
+		}
+		cfg.Runner.MaxEvidenceRequests = *update.Runner.MaxEvidenceRequests
+	}
 	if update.Runner.RequireAcceptForDevelopment != nil {
 		cfg.Runner.RequireAcceptForDevelopment = *update.Runner.RequireAcceptForDevelopment
 	}
@@ -509,7 +576,7 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.Runner.WorkspaceBytes != nil {
 		if !config.ValidWorkspaceBytes(*update.Runner.WorkspaceBytes) {
-			writeError(w, http.StatusBadRequest, "runner.workspace_bytes must be between 1 and 8589934592 bytes (8 GiB)")
+			writeError(w, http.StatusBadRequest, "runner.workspace_bytes 必须在 1 至 8589934592 字节（8 GiB）之间")
 			return
 		}
 		cfg.Runner.WorkspaceBytes = *update.Runner.WorkspaceBytes
@@ -536,35 +603,43 @@ func (h *Handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.Budget.OutputPrice = *update.Budget.OutputPrice
 	}
 	if !validSettings(cfg) {
-		writeError(w, http.StatusBadRequest, "invalid settings: mode must be fake or responses; builders/reviewers 1–2; workflow concurrency 1–4; budget and output limits must be valid")
+		writeError(w, http.StatusBadRequest, "设置无效：mode 必须为 fake 或 responses；旧版并发数必须为正数，工作流并发数为 1–4；单工作流智能体上限不得超过全局上限；预算和输出限额必须有效")
 		return
 	}
 	if strings.TrimSpace(update.Model.Token) != "" {
-		if err := h.engine.Invalidate(r.Context(), "model credential changed; resume to reconcile and reverify"); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not revoke current runs before credential update")
+		if err := h.engine.Invalidate(r.Context(), "模型凭据已变更，请恢复运行以重新协调和验证"); err != nil {
+			writeError(w, http.StatusInternalServerError, "更新凭据前无法撤销当前运行")
 			return
 		}
 		if cfg.Model.TokenFile == "" {
 			cfg.Model.TokenFile = filepath.Join(filepath.Dir(h.configPath), "model-token")
 		}
 		if err := writeSecret(resolveConfigPath(h.configPath, cfg.Model.TokenFile), strings.TrimSpace(update.Model.Token)); err != nil {
-			writeError(w, http.StatusInternalServerError, "could not save model token")
+			writeError(w, http.StatusInternalServerError, "无法保存模型访问令牌")
 			return
 		}
 	}
 	if err := h.persistConfig(cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save settings: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "无法保存设置："+err.Error())
 		return
 	}
 	if err := h.engine.SetConfig(r.Context(), cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "settings saved but engine reload failed: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "设置已保存，但引擎重新加载失败："+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": publicConfig(cfg)})
+	effective, err := h.engine.ExecutionConfig(r.Context())
+	if err != nil {
+		writeError(w, 503, "配置已保存，但无法读取实际并发限额")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": publicConfig(effective)})
 }
 
 func validSettings(cfg config.Config) bool {
-	if !((cfg.Runner.Mode == "fake" || cfg.Runner.Mode == "responses") && cfg.Runner.Builders >= 1 && cfg.Runner.Builders <= 2 && cfg.Runner.Reviewers >= 1 && cfg.Runner.Reviewers <= 2 && config.ValidWorkflowConcurrency(cfg.Runner.WorkflowConcurrency) && config.ValidWorkspaceBytes(cfg.EffectiveWorkspaceBytes()) && cfg.Runner.AttemptMinutes >= 1 && cfg.Budget.IssueCalls >= 1 && cfg.Budget.DailyCalls >= 1 && cfg.Budget.IssueMinutes >= 1 && cfg.Budget.MaxAttempts >= 1 && cfg.Budget.MaxFixRounds >= 0 && cfg.Model.MaxOutputTokens >= 1 && cfg.Budget.InputPrice >= 0 && cfg.Budget.OutputPrice >= 0 && !math.IsNaN(cfg.Budget.InputPrice) && !math.IsNaN(cfg.Budget.OutputPrice) && !math.IsInf(cfg.Budget.InputPrice, 0) && !math.IsInf(cfg.Budget.OutputPrice, 0)) {
+	if cfg.EffectiveAgentConcurrency() < 1 || cfg.EffectiveWorkflowAgentConcurrency() < 1 || cfg.EffectiveWorkflowAgentConcurrency() > cfg.EffectiveAgentConcurrency() || cfg.EffectiveMaxTasksPerWorkflow() < 1 || cfg.EffectiveMaxEvidenceRequests() < 1 {
+		return false
+	}
+	if !((cfg.Runner.Mode == "fake" || cfg.Runner.Mode == "responses") && cfg.Runner.Builders >= 1 && cfg.Runner.Reviewers >= 1 && config.ValidWorkflowConcurrency(cfg.Runner.WorkflowConcurrency) && config.ValidWorkspaceBytes(cfg.EffectiveWorkspaceBytes()) && cfg.Runner.AttemptMinutes >= 1 && cfg.Budget.IssueCalls >= 1 && cfg.Budget.DailyCalls >= 1 && cfg.Budget.IssueMinutes >= 1 && cfg.Budget.MaxAttempts >= 1 && cfg.Budget.MaxFixRounds >= 0 && cfg.Model.MaxOutputTokens >= 1 && cfg.Budget.InputPrice >= 0 && cfg.Budget.OutputPrice >= 0 && !math.IsNaN(cfg.Budget.InputPrice) && !math.IsNaN(cfg.Budget.OutputPrice) && !math.IsInf(cfg.Budget.InputPrice, 0) && !math.IsInf(cfg.Budget.OutputPrice, 0)) {
 		return false
 	}
 	if cfg.Model.BaseURL == "" {
@@ -635,7 +710,7 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 
 func writeSecret(path, value string) error {
 	if value == "" {
-		return errors.New("empty secret")
+		return errors.New("密钥不能为空")
 	}
 	return atomicWrite(path, []byte(value+"\n"), 0600)
 }
@@ -649,7 +724,7 @@ func (h *Handlers) command(w http.ResponseWriter, r *http.Request) {
 	path = strings.TrimSuffix(path, "/commands")
 	id, err := url.PathUnescape(path)
 	if err != nil || id == "" || strings.Contains(id, "/") {
-		writeError(w, http.StatusBadRequest, "invalid workflow id")
+		writeError(w, http.StatusBadRequest, "工作流 ID 无效")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -659,31 +734,31 @@ func (h *Handlers) command(w http.ResponseWriter, r *http.Request) {
 		ExpectedHeadSHA    *string `json:"expected_head_sha,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid command JSON")
+		writeError(w, http.StatusBadRequest, "命令 JSON 无效")
 		return
 	}
 	allowed := map[string]bool{"status": true, "pause": true, "resume": true, "cancel": true, "replan": true, "review deep": true, "takeover": true, "accept": true, "analyze": true, "forceaccept": true, "forceaccept dev": true, "forceaccept merge": true, "reject": true, "defer": true}
-	if !allowed[body.Command] {
-		writeError(w, http.StatusBadRequest, "unsupported workflow command")
+	if !allowed[body.Command] && !authorizationCommand(body.Command) {
+		writeError(w, http.StatusBadRequest, "不支持此工作流命令")
 		return
 	}
 	forceCommand := strings.HasPrefix(body.Command, "forceaccept")
-	if forceCommand && (body.ExpectedGeneration == nil || body.ExpectedHeadSHA == nil) {
-		writeError(w, http.StatusBadRequest, "forceaccept requires expected_generation and expected_head_sha from the confirmed workflow state")
+	if (forceCommand || authorizationCommand(body.Command)) && (body.ExpectedGeneration == nil || body.ExpectedHeadSHA == nil) {
+		writeError(w, http.StatusBadRequest, "显式授权命令必须携带已确认工作流状态的 expected_generation 和 expected_head_sha")
 		return
 	}
 	if body.ExpectedGeneration != nil {
 		current, getErr := h.engine.Store.Get(r.Context(), id)
 		if getErr != nil {
-			writeError(w, http.StatusConflict, "workflow changed before command confirmation")
+			writeError(w, http.StatusConflict, "工作流在命令确认前已发生变化")
 			return
 		}
 		if current.Generation != *body.ExpectedGeneration {
-			writeError(w, http.StatusConflict, "workflow generation changed; review the current state and confirm again")
+			writeError(w, http.StatusConflict, "工作流代次已变化，请检查当前状态并重新确认")
 			return
 		}
 		if body.ExpectedHeadSHA != nil && current.HeadSHA != *body.ExpectedHeadSHA {
-			writeError(w, http.StatusConflict, "pull request head changed; review the current state and confirm again")
+			writeError(w, http.StatusConflict, "PR 最新提交已变化，请检查当前状态并重新确认")
 			return
 		}
 	}
@@ -718,7 +793,7 @@ func (h *Handlers) audit(w http.ResponseWriter, r *http.Request) {
 		entries, err = h.allAudit(r.Context())
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load audit log")
+		writeError(w, http.StatusInternalServerError, "无法加载审计日志")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
@@ -776,12 +851,12 @@ func (h *Handlers) doctor(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	results := map[string]any{}
 	if err := h.engine.Store.DB.Ping(ctx); err != nil {
-		results["database"] = map[string]any{"status": "error", "message": "database ping failed"}
+		results["database"] = map[string]any{"status": "error", "message": "数据库连接检查失败"}
 	} else {
 		results["database"] = map[string]any{"status": "ok"}
 	}
 	if cfg.GitHub.AppID == 0 || cfg.GitHub.PrivateKeyFile == "" {
-		results["github"] = map[string]any{"status": "skip", "message": "GitHub App is not configured"}
+		results["github"] = map[string]any{"status": "skip", "message": "尚未配置 GitHub App"}
 	} else if app, err := h.engine.App(); err != nil {
 		results["github"] = map[string]any{"status": "error", "message": err.Error()}
 	} else if installs, err := app.ListInstallations(ctx); err != nil {
@@ -790,9 +865,9 @@ func (h *Handlers) doctor(w http.ResponseWriter, r *http.Request) {
 		results["github"] = map[string]any{"status": "ok", "installations": len(installs)}
 	}
 	if cfg.Runner.Mode == "fake" || !cfg.ModelReady() {
-		results["model"] = map[string]any{"status": "skip", "message": "real model is not configured or Fake mode is selected"}
+		results["model"] = map[string]any{"status": "skip", "message": "尚未配置真实模型或当前使用模拟模式"}
 	} else if secret, err := os.ReadFile(cfg.Model.TokenFile); err != nil {
-		results["model"] = map[string]any{"status": "error", "message": "model token file is unavailable"}
+		results["model"] = map[string]any{"status": "error", "message": "模型访问令牌文件不可用"}
 	} else if client, err := agent.NewClient(agent.Config{BaseURL: cfg.Model.BaseURL, Token: strings.TrimSpace(string(secret)), Model: cfg.Model.Dev, Stream: false, MaxOutputTokens: 4}); err != nil {
 		results["model"] = map[string]any{"status": "error", "message": err.Error()}
 	} else if err := client.Doctor(ctx); err != nil {
@@ -801,12 +876,12 @@ func (h *Handlers) doctor(w http.ResponseWriter, r *http.Request) {
 		results["model"] = map[string]any{"status": "ok"}
 	}
 	if cfg.Runner.Image == "" {
-		results["sandbox"] = map[string]any{"status": "skip", "message": "runner image is not configured"}
+		results["sandbox"] = map[string]any{"status": "skip", "message": "尚未配置执行容器镜像"}
 	} else {
 		cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", cfg.Runner.Image)
 		out, err := cmd.Output()
 		if err != nil {
-			results["sandbox"] = map[string]any{"status": "error", "message": "Docker daemon or runner image is unavailable"}
+			results["sandbox"] = map[string]any{"status": "error", "message": "Docker 服务或执行镜像不可用"}
 		} else {
 			results["sandbox"] = map[string]any{"status": "ok", "image_id": strings.TrimSpace(string(out))}
 		}
@@ -832,22 +907,22 @@ func (h *Handlers) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := h.engine.Config()
 	if cfg.GitHub.WebhookSecretFile == "" {
-		writeError(w, http.StatusServiceUnavailable, "webhook secret is not configured")
+		writeError(w, http.StatusServiceUnavailable, "尚未配置 Webhook 密钥")
 		return
 	}
 	secret, err := os.ReadFile(cfg.GitHub.WebhookSecretFile)
 	if err != nil || strings.TrimSpace(string(secret)) == "" {
-		writeError(w, http.StatusServiceUnavailable, "webhook secret is not configured")
+		writeError(w, http.StatusServiceUnavailable, "尚未配置 Webhook 密钥")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxWebhook)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "webhook payload exceeds 2 MiB or could not be read")
+		writeError(w, http.StatusRequestEntityTooLarge, "Webhook 数据超过 2 MiB 或无法读取")
 		return
 	}
 	if err := gh.VerifyWebhook(strings.TrimSpace(string(secret)), raw, r.Header.Get("X-Hub-Signature-256")); err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid webhook signature")
+		writeError(w, http.StatusUnauthorized, "Webhook 签名无效")
 		return
 	}
 	event := r.Header.Get("X-GitHub-Event")
@@ -857,16 +932,16 @@ func (h *Handlers) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed := map[string]bool{"issues": true, "issue_comment": true, "pull_request": true, "push": true, "check_run": true, "check_suite": true, "workflow_run": true, "pull_request_review": true}
 	if !allowed[event] {
-		writeError(w, http.StatusUnprocessableEntity, "unsupported GitHub event")
+		writeError(w, http.StatusUnprocessableEntity, "不支持此 GitHub 事件")
 		return
 	}
 	parsed, err := gh.ParseWebhook(raw)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid webhook payload")
+		writeError(w, http.StatusBadRequest, "Webhook 数据无效")
 		return
 	}
 	if parsed.Repository == nil || parsed.Repository.ID <= 0 || parsed.Repository.FullName == "" {
-		writeError(w, http.StatusUnprocessableEntity, "webhook repository identity is missing")
+		writeError(w, http.StatusUnprocessableEntity, "Webhook 缺少仓库身份")
 		return
 	}
 	matched := false
@@ -877,24 +952,24 @@ func (h *Handlers) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !matched {
-		writeError(w, http.StatusForbidden, "repository is not configured or its numeric ID is not bound")
+		writeError(w, http.StatusForbidden, "仓库未配置或尚未绑定数字 ID")
 		return
 	}
 	if parsed.Installation == nil || parsed.Installation.ID <= 0 {
-		writeError(w, http.StatusUnprocessableEntity, "webhook installation identity is missing")
+		writeError(w, http.StatusUnprocessableEntity, "Webhook 缺少安装身份")
 		return
 	}
 	if cfg.GitHub.InstallationID > 0 && parsed.Installation.ID != cfg.GitHub.InstallationID {
-		writeError(w, http.StatusForbidden, "webhook installation does not match configured installation")
+		writeError(w, http.StatusForbidden, "Webhook 安装身份与配置不匹配")
 		return
 	}
 	delivery := r.Header.Get("X-GitHub-Delivery")
 	if delivery == "" {
-		writeError(w, http.StatusBadRequest, "missing GitHub delivery ID")
+		writeError(w, http.StatusBadRequest, "缺少 GitHub 投递 ID")
 		return
 	}
 	if err := h.engine.Store.Inbox(r.Context(), delivery, event, raw); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not queue webhook")
+		writeError(w, http.StatusInternalServerError, "无法将 Webhook 加入队列")
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -923,7 +998,7 @@ func (h *Handlers) static(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	}
 	if err != nil {
-		http.Error(w, "embedded dashboard asset unavailable", http.StatusInternalServerError)
+		http.Error(w, "内嵌控制台资源不可用", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -979,16 +1054,16 @@ func (h *Handlers) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := setupTemplate.Execute(w, data); err != nil {
-		http.Error(w, "could not render setup", http.StatusInternalServerError)
+		http.Error(w, "无法呈现设置页面", http.StatusInternalServerError)
 	}
 }
 
 var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App 设置</title><style>
 *{box-sizing:border-box}body{margin:0;padding:38px 18px;background:#f4f6fa;color:#23314b;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}.wrap{max-width:850px;margin:auto}.card{margin:14px 0;padding:22px;background:white;border:1px solid #e4e9f1;border-radius:15px;box-shadow:0 8px 25px #1b2f520d}h1{font-size:27px;letter-spacing:-.04em;margin:5px 0 8px}h2{font-size:15px;margin:0 0 12px}.muted{color:#7c889c;font-size:12px;line-height:1.7}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.12em;color:#6079b7}.row{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:11px 0;border-top:1px solid #eef1f5}.row:first-of-type{border-top:0}.btn{display:inline-flex;align-items:center;justify-content:center;min-height:37px;padding:0 13px;border:0;border-radius:8px;background:#426bd8;color:#fff;font-weight:650;text-decoration:none;cursor:pointer}.btn.secondary{color:#465671;background:#f3f5fa;border:1px solid #e3e8f0}.field{display:grid;gap:7px;margin:14px 0;color:#57647a;font-size:11px;font-weight:650}.field input{height:39px;padding:0 11px;border:1px solid #dfe5ee;border-radius:8px;font:inherit}.message{padding:11px 13px;border-radius:8px;color:#315c9e;background:#eef4ff}.warning{color:#825d20;background:#fff6e6}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.small{font-size:10px;color:#8b96a8}@media(max-width:620px){body{padding:22px 12px}.card{padding:17px}.grid{grid-template-columns:1fr}.row{align-items:flex-start;flex-direction:column}}
-</style></head><body><main class="wrap"><p class="eyebrow">AI WORKFLOW · PRIVATE SETUP</p><h1>GitHub App 设置</h1><p class="muted">注册个人 GitHub App，完成安装后仅绑定配置文件中明确列出的仓库。控制台不会自动授权所有仓库。</p>
+</style></head><body><main class="wrap"><p class="eyebrow">智能体工作流 · 私有设置</p><h1>GitHub App 设置</h1><p class="muted">注册个人 GitHub App，完成安装后仅绑定配置文件中明确列出的仓库。控制台不会自动授权所有仓库。</p>
 {{if .Message}}<p class="message">{{.Message}}</p>{{end}}
 <section class="card"><h2>1 · 注册 App</h2><p class="muted">应用权限：Contents、Issues、Pull requests、Checks 写入；Actions 与 Metadata 读取。Webhook 事件限定在 Issue、PR、检查和工作流更新。</p><p class="small">请在 GitHub 个人账号 <strong>zymooll</strong> 登录后继续。应用将注册为 Public App；不要选择所有仓库的授权范围。</p><form method="post" action="/setup/manifest"><label class="field">公开 Webhook 基础 URL<input type="url" name="public_url" value="{{.PublicURL}}" placeholder="https://your-tunnel.example" required></label><p class="small">服务器会追加 <code>/webhooks/github</code>，并设置本地回调地址 <code>http://127.0.0.1:8081/setup/callback</code>。</p><button class="btn" type="submit">前往 GitHub 注册</button></form></section>
-{{if .AppID}}<section class="card"><h2>2 · 选择安装</h2><p class="muted">App ID：{{.AppID}}　当前 Installation：{{if .InstallationID}}{{.InstallationID}}{{else}}等待选择{{end}}</p>{{if .ListError}}<p class="message warning">安装列表查询失败：{{.ListError}}</p>{{end}}{{if .InstallURL}}<p><a class="btn secondary" href="{{.InstallURL}}" target="_blank" rel="noreferrer">打开 GitHub 安装页 ↗</a></p>{{end}}{{if .Installations}}{{range .Installations}}<form class="row" method="post" action="/setup/installation"><div><strong>{{.login}}</strong> <span class="small">{{.type}} · Installation {{.id}}</span>{{if .selected}} <span class="small">· 当前选择</span>{{end}}</div><input type="hidden" name="installation_id" value="{{.id}}"><button class="btn secondary" type="submit">选择并绑定配置仓库</button></form>{{end}}{{else}}<p class="muted">尚未发现安装。请打开 GitHub 安装页，选择 “Only select repositories”，仅勾选配置中列出的仓库，然后返回此页刷新。</p>{{end}}</section>{{end}}
+{{if .AppID}}<section class="card"><h2>2 · 选择安装</h2><p class="muted">App ID：{{.AppID}}　当前安装：{{if .InstallationID}}{{.InstallationID}}{{else}}等待选择{{end}}</p>{{if .ListError}}<p class="message warning">安装列表查询失败：{{.ListError}}</p>{{end}}{{if .InstallURL}}<p><a class="btn secondary" href="{{.InstallURL}}" target="_blank" rel="noreferrer">打开 GitHub 安装页 ↗</a></p>{{end}}{{if .Installations}}{{range .Installations}}<form class="row" method="post" action="/setup/installation"><div><strong>{{.login}}</strong> <span class="small">{{.type}} · 安装 {{.id}}</span>{{if .selected}} <span class="small">· 当前选择</span>{{end}}</div><input type="hidden" name="installation_id" value="{{.id}}"><button class="btn secondary" type="submit">选择并绑定配置仓库</button></form>{{end}}{{else}}<p class="muted">尚未发现安装。请打开 GitHub 安装页，选择 “Only select repositories”，仅勾选配置中列出的仓库，然后返回此页刷新。</p>{{end}}</section>{{end}}
 <section class="card"><h2>3 · 配置仓库绑定</h2><p class="muted">仅绑定以下配置仓库的数字 Repository ID。其他仓库即使在 GitHub App 安装范围内，也不会被该服务接受。</p>{{range .Repositories}}<div class="row"><strong>{{.name}}</strong><span class="small">{{if .bound}}Repository ID {{.id}}{{else}}尚未绑定{{end}}</span></div>{{else}}<p class="muted">配置中没有仓库条目。</p>{{end}}</section>
 <p class="muted"><a href="/">返回工作流控制台</a></p></main></body></html>`))
 
@@ -998,7 +1073,7 @@ func (h *Handlers) manifestStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := h.sessionID(r); !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		writeError(w, http.StatusUnauthorized, "请先登录")
 		return
 	}
 	if err := h.checkOrigin(r); err != nil {
@@ -1007,7 +1082,7 @@ func (h *Handlers) manifestStart(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid registration form")
+		writeError(w, http.StatusBadRequest, "注册表单无效")
 		return
 	}
 	publicURL, err := normalizePublicURL(r.FormValue("public_url"))
@@ -1018,16 +1093,16 @@ func (h *Handlers) manifestStart(w http.ResponseWriter, r *http.Request) {
 	cfg := h.engine.Config()
 	cfg.GitHub.PublicURL = publicURL
 	if err := h.persistConfig(cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save public URL")
+		writeError(w, http.StatusInternalServerError, "无法保存公开地址")
 		return
 	}
 	if err := h.engine.SetConfig(r.Context(), cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not reload configuration")
+		writeError(w, http.StatusInternalServerError, "无法重新加载配置")
 		return
 	}
 	state, err := randomToken(32)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create registration state")
+		writeError(w, http.StatusInternalServerError, "无法创建注册状态")
 		return
 	}
 	h.mu.Lock()
@@ -1047,12 +1122,12 @@ func (h *Handlers) manifestStart(w http.ResponseWriter, r *http.Request) {
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not encode App manifest")
+		writeError(w, http.StatusInternalServerError, "无法编码应用清单")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := manifestFormTemplate.Execute(w, map[string]string{"Manifest": string(manifestJSON), "State": state}); err != nil {
-		http.Error(w, "could not render registration handoff", http.StatusInternalServerError)
+		http.Error(w, "无法呈现注册跳转页面", http.StatusInternalServerError)
 	}
 }
 
@@ -1061,7 +1136,7 @@ var manifestFormTemplate = template.Must(template.New("manifest").Parse(`<!docty
 func normalizePublicURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New("public URL must be a valid HTTPS base URL without credentials, query, or fragment")
+		return "", errors.New("公开地址必须是有效的 HTTPS 基础地址，不能包含凭据、查询参数或片段")
 	}
 	path := strings.TrimRight(u.Path, "/")
 	if strings.HasSuffix(path, "/webhooks/github") {
@@ -1085,7 +1160,7 @@ func (h *Handlers) manifestCallback(w http.ResponseWriter, r *http.Request) {
 	delete(h.states, state)
 	h.mu.Unlock()
 	if !ok || state == "" || time.Now().After(pending.expires) || code == "" {
-		http.Error(w, "registration callback state is invalid, expired, or incomplete; return to dashboard setup", http.StatusBadRequest)
+		http.Error(w, "注册回调状态无效、已过期或不完整，请返回控制台设置", http.StatusBadRequest)
 		return
 	}
 	cfg := h.engine.Config()
@@ -1096,34 +1171,34 @@ func (h *Handlers) manifestCallback(w http.ResponseWriter, r *http.Request) {
 	endpoint := base + "/app-manifests/" + url.PathEscape(code) + "/conversions"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, nil)
 	if err != nil {
-		http.Error(w, "could not prepare manifest conversion", http.StatusInternalServerError)
+		http.Error(w, "无法准备应用清单转换", http.StatusInternalServerError)
 		return
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := h.client.Do(req)
 	if err != nil {
-		http.Error(w, "GitHub manifest conversion request failed", http.StatusBadGateway)
+		http.Error(w, "GitHub 应用清单转换请求失败", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		http.Error(w, "GitHub rejected manifest conversion", http.StatusBadGateway)
+		http.Error(w, "GitHub 拒绝了应用清单转换", http.StatusBadGateway)
 		return
 	}
 	var manifest gh.Manifest
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&manifest); err != nil {
-		http.Error(w, "GitHub manifest response was invalid", http.StatusBadGateway)
+		http.Error(w, "GitHub 应用清单响应无效", http.StatusBadGateway)
 		return
 	}
 	if manifest.ID <= 0 || manifest.Pem == "" || manifest.WebhookSecret == "" {
-		http.Error(w, "GitHub conversion omitted required App credentials", http.StatusBadGateway)
+		http.Error(w, "GitHub 转换响应缺少必需的应用凭据", http.StatusBadGateway)
 		return
 	}
 	configDir, err := filepath.Abs(filepath.Dir(h.configPath))
 	if err != nil {
-		http.Error(w, "could not resolve config directory", http.StatusInternalServerError)
+		http.Error(w, "无法解析配置目录", http.StatusInternalServerError)
 		return
 	}
 	if cfg.GitHub.PrivateKeyFile == "" {
@@ -1133,20 +1208,20 @@ func (h *Handlers) manifestCallback(w http.ResponseWriter, r *http.Request) {
 		cfg.GitHub.WebhookSecretFile = filepath.Join(configDir, "webhook-secret")
 	}
 	if err := writeSecret(resolveConfigPath(h.configPath, cfg.GitHub.PrivateKeyFile), manifest.Pem); err != nil {
-		http.Error(w, "could not securely save App private key", http.StatusInternalServerError)
+		http.Error(w, "无法安全保存应用私钥", http.StatusInternalServerError)
 		return
 	}
 	if err := writeSecret(resolveConfigPath(h.configPath, cfg.GitHub.WebhookSecretFile), manifest.WebhookSecret); err != nil {
-		http.Error(w, "could not securely save Webhook secret", http.StatusInternalServerError)
+		http.Error(w, "无法安全保存 Webhook 密钥", http.StatusInternalServerError)
 		return
 	}
 	cfg.GitHub.AppID = manifest.ID
 	if err := h.persistConfig(cfg); err != nil {
-		http.Error(w, "App credentials saved but configuration update failed", http.StatusInternalServerError)
+		http.Error(w, "应用凭据已保存，但配置更新失败", http.StatusInternalServerError)
 		return
 	}
 	if err := h.engine.SetConfig(r.Context(), cfg); err != nil {
-		http.Error(w, "App credentials saved but engine reload failed", http.StatusInternalServerError)
+		http.Error(w, "应用凭据已保存，但引擎重新加载失败", http.StatusInternalServerError)
 		return
 	}
 	if manifest.HTMLURL != "" {
@@ -1189,7 +1264,7 @@ func (h *Handlers) discover(w http.ResponseWriter, r *http.Request) {
 		InstallationID int64 `json:"installation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid installation selection JSON")
+		writeError(w, http.StatusBadRequest, "安装选择 JSON 无效")
 		return
 	}
 	if body.InstallationID == 0 {
@@ -1261,7 +1336,7 @@ func (h *Handlers) bindInstallation(ctx context.Context, installationID int64) (
 		}
 	}
 	if !found {
-		return nil, errors.New("installation is not accessible to this GitHub App")
+		return nil, errors.New("此 GitHub App 无权访问所选安装")
 	}
 	client := app.ForInstallation(ctx, installationID)
 	available := make(map[string]gh.Repository)
@@ -1283,7 +1358,7 @@ func (h *Handlers) bindInstallation(ctx context.Context, installationID int64) (
 			break
 		}
 		if page == 100 {
-			return nil, errors.New("installation repository pagination limit exceeded")
+			return nil, errors.New("安装仓库列表超过分页上限")
 		}
 	}
 	cfg := h.engine.Config()
@@ -1293,11 +1368,11 @@ func (h *Handlers) bindInstallation(ctx context.Context, installationID int64) (
 		configured := &cfg.Repositories[n]
 		remote, ok := available[configured.Name]
 		if !ok {
-			bindings = append(bindings, map[string]any{"name": configured.Name, "bound": false, "reason": "not selected in GitHub installation"})
+			bindings = append(bindings, map[string]any{"name": configured.Name, "bound": false, "reason": "未在 GitHub 安装中选择"})
 			continue
 		}
 		if configured.ID > 0 && configured.ID != remote.ID {
-			bindings = append(bindings, map[string]any{"name": configured.Name, "bound": false, "reason": "configured numeric ID does not match GitHub"})
+			bindings = append(bindings, map[string]any{"name": configured.Name, "bound": false, "reason": "配置的数字 ID 与 GitHub 不一致"})
 			continue
 		}
 		configured.ID = remote.ID
@@ -1323,5 +1398,5 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 func methodNotAllowed(w http.ResponseWriter) {
-	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	writeError(w, http.StatusMethodNotAllowed, "不支持此请求方法")
 }

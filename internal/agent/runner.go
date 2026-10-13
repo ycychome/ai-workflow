@@ -23,6 +23,8 @@ type Tool struct {
 // Request is one bounded agent run. Input is any JSON value accepted by the
 // Responses API input field, commonly a JSON string or an array of input items.
 type Request struct {
+	Role           RoleID
+	PromptVersion  string
 	System         string
 	Input          json.RawMessage
 	Model          string
@@ -188,7 +190,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 					return result, fmt.Errorf("agent: submitted report rejected and request limit exhausted: %w", reportErr)
 				}
 				inputItems = append(inputItems, response.Output...)
-				feedback, _ := json.Marshal(map[string]string{"error": "submitted report rejected: " + reportErr.Error()})
+				feedback, _ := json.Marshal(map[string]string{"error": "提交的报告校验未通过，请按以下原因修正并重新提交：" + reportErr.Error()})
 				outputItem, err := json.Marshal(functionOutputItem{Type: "function_call_output", CallID: calls[0].CallID, Output: string(feedback)})
 				if err != nil {
 					return result, fmt.Errorf("agent: encode report validation feedback: %w", err)
@@ -323,7 +325,7 @@ func prepareTools(tools []Tool, reportSchema json.RawMessage) ([]apiTool, map[st
 		handlers[tool.Name] = tool.Handler
 		schemas[tool.Name] = append(json.RawMessage(nil), tool.Parameters...)
 	}
-	api = append(api, apiTool{Type: "function", Name: "submit_report", Description: "Submit the final structured report for this role.",
+	api = append(api, apiTool{Type: "function", Name: "submit_report", Description: "提交本角色最终结构化报告；本工具独占该次响应，校验失败后可修正并重新提交。",
 		Parameters: append(json.RawMessage(nil), reportSchema...), Strict: false})
 	return api, handlers, schemas, append(json.RawMessage(nil), reportSchema...), nil
 }

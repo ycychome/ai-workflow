@@ -173,6 +173,10 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			}
 		}
 	}
+	var ciErr error
+	if gate != nil && gate.Conclusion == "success" && w.Review.Verdict != "FORCED" && e.repository(w).TrustedCI != nil && w.HeadSHA == pr.Head.SHA {
+		_, ciErr = e.trustedCIGate(ctx, w)
+	}
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 		if x.Version != w.Version || x.Generation != w.Generation {
 			return nil, store.ErrStale
@@ -314,6 +318,9 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			x.Review.Verdict = "OBSOLETE"
 			x.LastError = "base branch changed; candidate must be reverified"
 			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
+		}
+		if ciErr != nil {
+			return invalidateTrustedCIPass(x, ciErr), nil
 		}
 		if gate != nil && x.HeadSHA == pr.Head.SHA && (x.CheckID != gate.ID || x.CheckSHA != pr.Head.SHA || x.GateStatus != gate.Status || x.GateConclusion != gate.Conclusion) {
 			x.CheckID = gate.ID

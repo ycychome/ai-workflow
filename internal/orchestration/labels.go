@@ -17,6 +17,7 @@ func workflowLabels(w domain.Workflow) []gh.Label {
 	phases := map[string]string{
 		"INTAKE": "待处理", "TRIAGE": "需求分析", "SPEC_READY": "待确认方案", "PLANNING": "规划中", "DEVELOPING": "开发中",
 		"VERIFYING": "验证中", "REVIEWING": "审查中", "WAITING_CONFIGURATION": "等待配置", "NEEDS_INFO": "需要补充信息",
+		"WAITING_CI": "等待可信CI", "WAITING_RISK": "等待风险授权", "WAITING_DAILY_BUDGET": "等待次日额度", "EVALUATION_COMPLETE": "评估已完成",
 		"DEFERRED": "已暂缓", "REJECT_PROPOSED": "等待覆核的拒绝建议", "REJECTED": "已拒绝", "CHANGES_REQUESTED": "待修复", "BLOCKED": "受阻",
 		"READY": "待远端检查", "AWAITING_MAINTAINER": "待维护者合并", "MERGED": "已合并",
 	}
@@ -27,7 +28,7 @@ func workflowLabels(w domain.Workflow) []gh.Label {
 	}
 	color := "1d76db"
 	switch w.Phase {
-	case "NEEDS_INFO", "SPEC_READY", "DEFERRED", "WAITING_CONFIGURATION", "REJECT_PROPOSED":
+	case "NEEDS_INFO", "SPEC_READY", "DEFERRED", "WAITING_CONFIGURATION", "REJECT_PROPOSED", "WAITING_CI", "WAITING_RISK", "WAITING_DAILY_BUDGET":
 		color = "fbca04"
 	case "BLOCKED", "CHANGES_REQUESTED", "REJECTED":
 		color = "d73a4a"

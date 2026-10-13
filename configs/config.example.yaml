@@ -19,8 +19,11 @@ runner:
   mode: responses # fake runs deterministic fixture without API credentials
   image: ai-workflow-runner:local
   workspace_bytes: 536870912 # 512 MiB per workspace; bounded tmpfs, valid range 1..8589934592 bytes
-  builders: 2
-  reviewers: 2
+  agent_concurrency: 4 # all active planner/builder/reviewer/skeptic sessions globally
+  workflow_agent_concurrency: 2 # active sessions per issue; <= agent_concurrency
+  max_tasks_per_workflow: 64
+  max_evidence_requests: 64
+  # builders/reviewers are deprecated; old files map sum to global and max to per-issue capacity
   workflow_concurrency: 2 # 1-4; human waiting phases do not occupy a slot
   require_accept_for_analysis: false # true waits for /ai accept before triage
   require_accept_for_development: false # true waits for /ai accept after AI approves the TaskSpec
@@ -41,6 +44,7 @@ repositories:
     allowed_paths: ["**"]
     protected_paths: [".github/**"]
     policy_version: v1
+    verification_services: [postgres] # private offline Unix-socket database per attempt
     verification:
       - [go, test, ./...]
       - [go, vet, ./...]

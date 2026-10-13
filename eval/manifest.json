@@ -1,0 +1,368 @@
+{
+  "version": "issuedesk-alpha-v2-external-judge",
+  "language": "zh-CN",
+  "source_provenance": "本项目独立编写的合成工单服务，不含真实客户数据",
+  "baseline_files": {
+    "fixtures/issuedesk/Dockerfile": "f8cb98d1b82ff6fa34f0f4c9cabe09daa3235e58ba7330cad76fdde57caa5728",
+    "fixtures/issuedesk/README.md": "db663b1d0456aab5396261a9c2eff44c5cff57883bfc411d716f5824dff74178",
+    "fixtures/issuedesk/app.go": "db51ecc54947700aa2ae56187fcb893bcab579f43de6d1d8c89b41c37f6ab4d8",
+    "fixtures/issuedesk/app_test.go": "c6ddad751cb30b44a0c993cd6375f4809324069ae4ee7eecbdf300afda041e62",
+    "fixtures/issuedesk/cmd/issuedesk/main.go": "32bac344034f83964db22dddb4944b158664f95ac093050480a23813ad0fe028",
+    "fixtures/issuedesk/compose.yaml": "8241fa45611687cd859802aa7df1f256bd9a32b5232c483fa662fb72d5e0d796",
+    "fixtures/issuedesk/migrate.go": "88dfb26eb16b9445103eb47f40103bafaef1c55886d35389adda4e1f0792566a",
+    "fixtures/issuedesk/migrations/001_schema.sql": "163bce1902e804881b2dfbb0269a11a139fdae3d065a9f2d1cb60a1e146f100e",
+    "fixtures/issuedesk/migrations/002_indexes.sql": "1a7888144f11f270c20959373f939081695a253cb927771693fefee394e69257",
+    "fixtures/issuedesk/model.go": "21ee9891f2d3d2681071bcfa0929b32011bf0c086ac49c617dbdda0c25fe5a6a",
+    "fixtures/issuedesk/store.go": "7b8a5fd1c18adecb48c737294dd5248839a06030280710e5cec5f47ab4059f05",
+    "fixtures/issuedesk/web/app.css": "28620e7484391f7cf0d9c27b83607013cbbfbd6df20144af564f0a25361762b5",
+    "fixtures/issuedesk/web/app.js": "706f0edc38c88dd37464f4a6fce16bc1db5634e5eedeb05e3c0ef2e1274ec7be",
+    "fixtures/issuedesk/web/index.html": "adf56a1c09d51f41c95b2fbf09d09cd2a0b125092ac786017aa8057e797da81d",
+    "go.mod": "a697c5f745599435a26ed216acd8cf2c275b21efed2c4d180ab40e1e8dab583b",
+    "go.sum": "993e50f19ae391c6074b7aaa60ff36559a5330f7363bd380e96da68f5ab02f4a"
+  },
+  "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+  "trusted_files": {
+    "variants.json": "cd342a7375d346a343c86cdc77da4b1aa25ae0bd29f87d8f712ae4b396f7beee",
+    "cli.py": "081d3e0b07e30a6f7b2db4a483fda5125e754ac11deb967a204bbbc267a5e8b5",
+    "protocol.md": "e6c1e511f269b4caf9c3eb48afed15768c231c8af360ad71995acbde91182565",
+    "trusted/driver/main.go.txt": "81789f3582185cfd5d2247184a789c59b697cb2ea13a005dc5cd08fd5d5d1b67",
+    "trusted/harness/go.mod": "b4f6da7af94ca7ea2542e24f08b7c68028ce6eb7a262b2e83c74561d69618237",
+    "trusted/harness/go.sum": "993e50f19ae391c6074b7aaa60ff36559a5330f7363bd380e96da68f5ab02f4a",
+    "trusted/harness/judge_test.go": "734c8f13742d767032619f9e728cbdee0385917ab509adb36788b04f5a66b164"
+  },
+  "arms": {
+    "A": "单 Builder 与相同 CI",
+    "B": "单 Builder、单 Reviewer 与相同 CI",
+    "C": "完整双团队与对抗验证及相同 CI"
+  },
+  "repetitions": 3,
+  "total_development_runs": 90,
+  "budget_source": "matrix --execution-config 读取运行器导出的有效非敏感配置，无默认预算",
+  "tasks": [
+    {
+      "id": "T01",
+      "category": "pagination",
+      "issue_path": "tasks/T01.md",
+      "issue_sha256": "7c5dd9a6fc03d26ec61aebe5538e44cc181d3b3f6991e43f2f7e0afb5653458f",
+      "test_pattern": "^TestHiddenT01Pagination$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "22d9ad42969d942a979361e7cc8453534acc7f99f530a19da4fb7182dece02f1",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T02",
+      "category": "state_machine",
+      "issue_path": "tasks/T02.md",
+      "issue_sha256": "4b2b77e26bbab8c07846e4ac929519b1cf4afc66bc0a1547722ebdff89b48f93",
+      "test_pattern": "^TestHiddenT02StateMachine$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "28128554cfa5187a6f5c62f224930268ae0232e238f68ce9828a42a1f9a849e7",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T03",
+      "category": "transaction",
+      "issue_path": "tasks/T03.md",
+      "issue_sha256": "e6a43923198a07afd399c7c28fc25368d994e75e95d8cc10d9b2e01f4d9ad71c",
+      "test_pattern": "^TestHiddenT03Transaction$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "c3f2d591d4e5e026fb514055042e28e8976489f38dd53bec5ffd0dac232de6c8",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T04",
+      "category": "tenant_authorization",
+      "issue_path": "tasks/T04.md",
+      "issue_sha256": "4ba6b44058cff4b8eea7c18dbe9a7f8e84c555780574cf409ee2170f12d2c190",
+      "test_pattern": "^TestHiddenT04Tenant$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "ffd16b0dfd3d3fed864a2e2ae001c41bef9f9b82ae982422178471c138266521",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T05",
+      "category": "concurrency",
+      "issue_path": "tasks/T05.md",
+      "issue_sha256": "d2ead87a8c5eceda870183e763379b1f2b7590ded168de32b023889aa633b957",
+      "test_pattern": "^TestHiddenT05Concurrency$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "c82d18dad98afff71243492a3398d06d715d879d7901b47163f4ef740f3a5a2f",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T06",
+      "category": "idempotency",
+      "issue_path": "tasks/T06.md",
+      "issue_sha256": "d589169181d6c692ac35091e6a9873822595ebf90548e71b44d18405788ba72b",
+      "test_pattern": "^TestHiddenT06Idempotency$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "73963e784c3ce5d86b09774d2fa31cc8e9b0ce1ec0b464419c097dadf7a894e3",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T07",
+      "category": "search",
+      "issue_path": "tasks/T07.md",
+      "issue_sha256": "a8f30873f150c528571405dec5996e75485666736d76f8bdd176d8f8a426ad4c",
+      "test_pattern": "^TestHiddenT07Search$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "bac6e2d82cc85108fef5723007093b232dee99cebec92f8f082113a33145b59c",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T08",
+      "category": "migration",
+      "issue_path": "tasks/T08.md",
+      "issue_sha256": "eb607ce9723c70e87472210a106090c585c19555cd3b8593d05904ed3b6dc53b",
+      "test_pattern": "^TestHiddenT08Migration$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "fefcb791777b611b4945d04bc6c5e40cea05904a162e27f1f8e34347df62c11e",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T09",
+      "category": "api_compatibility",
+      "issue_path": "tasks/T09.md",
+      "issue_sha256": "cc40fba149892cbb96839599d94093dc9664f0d3134d0d99c2531851f87383ef",
+      "test_pattern": "^TestHiddenT09APICompatibility$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "ebb70f7aced1c2bebd2181fa0b62df825a36cf7e20d5e0c53ad48e846b22fbf8",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    },
+    {
+      "id": "T10",
+      "category": "web_security",
+      "issue_path": "tasks/T10.md",
+      "issue_sha256": "eb34c3ff690e6b15dd29d5c7d9a120db09461ea0e9a882ce7dbde6b3596ee06a",
+      "test_pattern": "^TestHiddenT10WebSafety$",
+      "independent_rebuild": true,
+      "baseline_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "defect_source_sha256": "c16e0fe662078ac8da425d6cb98b2908d447e80fceb0de120bffff55c8dd9ad9",
+      "fix_source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+      "baseline_expected": "pass",
+      "defect_expected": "target_assertion_failure",
+      "fix_expected": "pass",
+      "execution_validation": "passed_external_harness_pg_docker"
+    }
+  ],
+  "review_pairs": [
+    {
+      "pair_id": "T01",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T01-defect",
+          "source_sha256": "22d9ad42969d942a979361e7cc8453534acc7f99f530a19da4fb7182dece02f1",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T01-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T02",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T02-defect",
+          "source_sha256": "28128554cfa5187a6f5c62f224930268ae0232e238f68ce9828a42a1f9a849e7",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T02-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T03",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T03-defect",
+          "source_sha256": "c3f2d591d4e5e026fb514055042e28e8976489f38dd53bec5ffd0dac232de6c8",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T03-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T04",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T04-defect",
+          "source_sha256": "ffd16b0dfd3d3fed864a2e2ae001c41bef9f9b82ae982422178471c138266521",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T04-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T05",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T05-defect",
+          "source_sha256": "c82d18dad98afff71243492a3398d06d715d879d7901b47163f4ef740f3a5a2f",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T05-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T06",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T06-defect",
+          "source_sha256": "73963e784c3ce5d86b09774d2fa31cc8e9b0ce1ec0b464419c097dadf7a894e3",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T06-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T07",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T07-defect",
+          "source_sha256": "bac6e2d82cc85108fef5723007093b232dee99cebec92f8f082113a33145b59c",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T07-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T08",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T08-defect",
+          "source_sha256": "fefcb791777b611b4945d04bc6c5e40cea05904a162e27f1f8e34347df62c11e",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T08-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T09",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T09-defect",
+          "source_sha256": "ebb70f7aced1c2bebd2181fa0b62df825a36cf7e20d5e0c53ad48e846b22fbf8",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T09-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    },
+    {
+      "pair_id": "T10",
+      "human_review": "pending",
+      "review_evidence": null,
+      "candidates": [
+        {
+          "candidate_id": "T10-defect",
+          "source_sha256": "c16e0fe662078ac8da425d6cb98b2908d447e80fceb0de120bffff55c8dd9ad9",
+          "label": "defect"
+        },
+        {
+          "candidate_id": "T10-fix",
+          "source_sha256": "e0789c8b9c46c9c69680caffc38c7fa45a4dd2843330bed6ec4f36c9ae4d0771",
+          "label": "fixed"
+        }
+      ]
+    }
+  ],
+  "validation_state": "implemented_not_executed",
+  "label_policy": "所有生成标签必须经人工校核后才可作为正式真值；当前均待校核",
+  "judge_protocol": "isolated-http-pg-v2"
+}

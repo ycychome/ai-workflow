@@ -68,7 +68,7 @@ func run(configPath string, doctor bool) error {
 		return runDoctor(context.Background(), cfg, e, st)
 	}
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if err := e.Sandbox.Recover(recoveryCtx); err != nil {
+	if err := e.RecoverAgents(recoveryCtx); err != nil {
 		log.Printf("sandboxunavailable: startup recovery incomplete: %v", err)
 	}
 	recoveryCancel()

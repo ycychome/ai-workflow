@@ -19,12 +19,13 @@ func (m *Manager) createWorkspaceStorage(ctx context.Context, w *Workspace) erro
 	if _, err := m.dockerOutput(ctx, "volume", "create", "--driver", "local",
 		"--opt", "type=tmpfs", "--opt", "device=tmpfs", "--opt", "o="+options,
 		"--label", managedLabel+"="+managedValue,
-		"--label", workspaceLabel+"="+workspaceHashForVolume(w.volume), w.volume); err != nil {
+		"--label", workspaceLabel+"="+workspaceHashForVolume(w.volume), "--label", runLabel+"="+runHash(w.ID), w.volume); err != nil {
 		return fmt.Errorf("create bounded workspace volume: %w", err)
 	}
 	args := []string{"run", "--detach", "--name", w.keeper, "--restart", "no",
 		"--label", managedLabel + "=" + managedValue,
 		"--label", workspaceLabel + "=" + workspaceHashForVolume(w.volume),
+		"--label", runLabel + "=" + runHash(w.ID),
 		"--network", "none", "--user", workerUID, "--read-only", "--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges:true", "--pids-limit", "16", "--cpus", "0.050",
 		"--memory", "16m", "--memory-swap", "16m", "--log-driver", "none",
@@ -109,6 +110,14 @@ func (m *Manager) checkKeeper(ctx context.Context, w *Workspace) error {
 	if w.keeperStartedAt == "" {
 		w.keeperStartedAt = k.State.StartedAt
 	}
+	if w.reviewScratch != nil {
+		if err := w.reviewScratch.manager.checkKeeper(ctx, w.reviewScratch); err != nil {
+			return err
+		}
+	}
+	if w.judgeTransport != nil {
+		return w.judgeTransport.manager.checkKeeper(ctx, w.judgeTransport)
+	}
 	return nil
 }
 
@@ -141,6 +150,14 @@ func (m *Manager) beginWorkspaceOperation(ctx context.Context, w *Workspace) (fu
 // after keeper loss. Project code cannot change a filesystem's kernel ID.
 func workspaceCommand(w *Workspace, command []string) []string {
 	const guard = `expected=$1; shift; actual=$(/usr/bin/stat -f -c %i /workspace); if [ "$actual" != "$expected" ]; then echo 'workspace filesystem changed; refusing to execute' >&2; exit 125; fi; exec "$@"`
+	if w.reviewScratch != nil {
+		const reviewGuard = `expected=$1; shift; actual=$(/usr/bin/stat -f -c %i /workspace/review_tests); if [ "$actual" != "$expected" ]; then echo 'review scratch filesystem changed; refusing to execute' >&2; exit 125; fi; exec "$@"`
+		command = append([]string{"/bin/sh", "-ceu", reviewGuard, "review-guard", w.reviewScratch.filesystemID}, command...)
+	}
+	if w.judgeTransport != nil {
+		const transportGuard = `expected=$1; shift; actual=$(/usr/bin/stat -f -c %i /run/aiwf-judge); if [ "$actual" != "$expected" ]; then echo 'judge transport filesystem changed; refusing to execute' >&2; exit 125; fi; exec "$@"`
+		command = append([]string{"/bin/sh", "-ceu", transportGuard, "judge-guard", w.judgeTransport.filesystemID}, command...)
+	}
 	args := []string{"/bin/sh", "-ceu", guard, "workspace-guard", w.filesystemID}
 	return append(args, command...)
 }
@@ -148,8 +165,24 @@ func workspaceCommand(w *Workspace, command []string) []string {
 // Cleanup only addresses this workspace's unguessable label. This also reaps
 // a helper whose attached Docker CLI was interrupted before Docker removed it.
 func (m *Manager) removeWorkspaceStorage(ctx context.Context, w *Workspace) error {
+	var peerErr error
+	if w.judgePeer != nil {
+		peerErr = m.Destroy(ctx, w.judgePeer)
+	}
 	containersErr := m.removeWorkspaceContainers(ctx, w)
-	return errors.Join(containersErr, m.removeVolume(ctx, w.volume))
+	var serviceErr error
+	if w.socketVolume != "" && !w.sharedServices {
+		serviceErr = m.removeVolume(ctx, w.socketVolume)
+	}
+	var scratchErr error
+	if w.reviewScratch != nil {
+		scratchErr = w.reviewScratch.manager.Destroy(ctx, w.reviewScratch)
+	}
+	var transportErr error
+	if w.judgeTransport != nil && w.judgeOwner == nil {
+		transportErr = w.judgeTransport.manager.Destroy(ctx, w.judgeTransport)
+	}
+	return errors.Join(peerErr, containersErr, serviceErr, scratchErr, transportErr, m.removeVolume(ctx, w.volume))
 }
 
 func (m *Manager) removeWorkspaceContainers(ctx context.Context, w *Workspace) error {

@@ -73,8 +73,9 @@ func safetyRegressionDB(t *testing.T) (*Engine, context.Context) {
 func TestSafetyRegressionInvalidSeverityCanPassGate(t *testing.T) {
 	w := domain.Workflow{Control: "ACTIVE", Spec: domain.Spec{Approved: true, Criteria: []domain.Criterion{{ID: "AC1"}}}, Review: domain.Review{Key: "key", VerificationPassed: true, SkepticComplete: true, Obligations: []domain.Obligation{{ID: "O1", CriterionID: "AC1"}}}}
 	report := map[string]any{
-		"obligations": []any{map[string]any{"id": "O1", "description": "Requirement", "criterion_id": "AC1", "result": "satisfied", "evidence": []string{"EV1"}}},
-		"findings":    []any{map[string]any{"id": "F1", "severity": "HIGH", "category": "correctness", "path": "main.go", "line": 1, "description": "Wrong result on boundary", "expected": "Correct result", "actual": "Wrong result", "preconditions": "Boundary input", "evidence_type": "SOURCE_ANALYSIS", "evidence": []string{"EV1"}, "state": "CONFIRMED"}}, "summary": "Found blocking issue"}
+		"evidence_requests": []any{},
+		"obligations":       []any{map[string]any{"id": "O1", "description": "Requirement", "criterion_id": "AC1", "result": "satisfied", "evidence": []string{"EV1"}}},
+		"findings":          []any{map[string]any{"id": "F1", "severity": "HIGH", "category": "correctness", "path": "main.go", "line": 1, "description": "Wrong result on boundary", "expected": "Correct result", "actual": "Wrong result", "preconditions": "Boundary input", "evidence_type": "SOURCE_ANALYSIS", "evidence": []string{"EV1"}, "state": "CONFIRMED"}}, "summary": "Found blocking issue"}
 	b, _ := json.Marshal(report)
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
@@ -188,7 +189,7 @@ func TestSafetyRegressionSkepticDowngradeWithoutEvidence(t *testing.T) {
 	f.EvidenceType = "MODEL_CLAIM"
 	f.Evidence = nil
 	report := reviewReport{Obligations: w.Review.Obligations, Findings: []domain.Finding{f}, Summary: "It is probably fine"}
-	if err := mergeReport(&w, report, []string{"O1"}, nil, true); err == nil || !strings.Contains(err.Error(), "downgrade") {
+	if err := mergeReport(&w, report, []string{"O1"}, nil, true); err == nil || !strings.Contains(err.Error(), "降低审查发现严重程度") {
 		t.Fatalf("expected explicit severity downgrade rejection, got %v", err)
 	}
 	if pass, reason := domain.Gate(w, "key"); pass {
