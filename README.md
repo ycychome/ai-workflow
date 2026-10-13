@@ -45,6 +45,23 @@ configuration-aware diagnostic CLI is `control -doctor -config
 /secrets/config.yaml`. To walk through the fixed pilot path without external
 calls, select Fake mode and create the local demo.
 
+## Workspace capacity
+
+Each sandbox workspace has a filesystem capacity limit, including checked-out
+source, Git metadata, generated files and build caches under `/workspace`.
+`runner.workspace_bytes` defaults to `536870912` (512 MiB); configuration accepts
+positive integer byte counts up to 8 GiB. Docker stores each workspace in a
+bounded tmpfs-backed named volume, held mounted by a controller-owned keeper
+container for that workspace's lifetime. Normal cleanup removes the keeper and
+volume. Unsupported tmpfs mounting or quota setup fails workspace creation;
+there is no fallback to an unbounded disk volume.
+
+Tmpfs consumes Docker-host RAM and may use swap; on Colima this means the VM's
+resources. Allow for all concurrent workspaces as well as runner memory limits.
+Changing the capacity invalidates current verification and creates a new manager
+for future workspaces. See the [runbook](docs/runbook.md#workspace-capacity-and-cleanup)
+for configuration, restart and cleanup details.
+
 ## Connect GitHub
 
 After signing in to the dashboard, use the GitHub App setup button or open

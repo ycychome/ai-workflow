@@ -98,15 +98,45 @@ func (e *Engine) verificationSnapshot(ctx context.Context, w *domain.Workflow) (
 		return nil, false, store.ErrStale
 	}
 
-	archive, err := c.GetArchive(ctx, owner, repo, pr.MergeCommitSHA)
-	if err != nil {
-		return nil, false, err
-	}
-	files, err = decodeArchive(archive)
+	files, err = e.source(ctx, *w, pr.MergeCommitSHA)
 	if err != nil {
 		return nil, false, err
 	}
 	w.TestedSHA = pr.MergeCommitSHA
 	w.TestedTreeSHA = mergeCommit.Tree.SHA
 	return files, false, nil
+}
+
+// reviewSnapshot is the exact tree used by trusted verification. A branch head
+// alone omits changes already present on the target branch, so source review,
+// candidate diffs and supplemental tests must all use the recorded test merge.
+func (e *Engine) reviewSnapshot(ctx context.Context, w domain.Workflow) (map[string]sandbox.File, error) {
+	if w.TestedSHA == "" || w.TestedTreeSHA == "" {
+		return nil, errors.New("review requires the exact verified commit and tree")
+	}
+	if w.Repository != "local/pilot" {
+		c, owner, repo, err := e.client(ctx, w)
+		if err != nil {
+			return nil, err
+		}
+		commit, err := c.GetCommitInfo(ctx, owner, repo, w.TestedSHA)
+		if err != nil {
+			return nil, err
+		}
+		parents := map[string]int{}
+		for _, parent := range commit.Parents {
+			parents[parent]++
+		}
+		if commit.TreeSHA != w.TestedTreeSHA || len(commit.Parents) != 2 || parents[w.BaseSHA] != 1 || parents[w.HeadSHA] != 1 {
+			return nil, store.ErrStale
+		}
+	}
+	files, err := e.source(ctx, w, w.TestedSHA)
+	if err != nil {
+		return nil, err
+	}
+	if w.Repository == "local/pilot" && (w.TestedSHA != w.HeadSHA || contentDigest(files) != w.TestedTreeSHA) {
+		return nil, store.ErrStale
+	}
+	return files, nil
 }

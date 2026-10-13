@@ -128,6 +128,33 @@ func TestForceCommandsPostgresIntegration(t *testing.T) {
 	if e.ForceApprovalCurrent(ctx, changedHead) {
 		t.Fatal("changed PR head must invalidate the current force approval")
 	}
+	// No passing gate exists before the ready receipt. Exercise the real ready
+	// action, then its child gate, including a replay of the ready receipt.
+	var premature int
+	if err := s.DB.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE workflow_id=$1 AND kind='gate' AND data->>'pass'='true'`, pr.ID).Scan(&premature); err != nil || premature != 0 {
+		t.Fatalf("premature gate: count=%d err=%v", premature, err)
+	}
+	var readyID string
+	if err := s.DB.QueryRow(ctx, `SELECT id FROM outbox WHERE workflow_id=$1 AND kind='ready' AND state='pending'`, pr.ID).Scan(&readyID); err != nil {
+		t.Fatal(err)
+	}
+	ready := setPrePRActionRunning(t, ctx, s, readyID)
+	for i := 0; i < 2; i++ {
+		if _, err, unknown := e.performAction(ctx, ready); err != nil || unknown {
+			t.Fatalf("ready receipt/replay: err=%v unknown=%v", err, unknown)
+		}
+	}
+	if err := s.FinishAction(ctx, ready, map[string]bool{"ready": true}, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Get(ctx, pr.ID)
+	if err != nil || !got.PRReady {
+		t.Fatalf("ready not persisted: %v", err)
+	}
+	var childCount int
+	if err := s.DB.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE workflow_id=$1 AND kind='gate' AND data->>'pass'='true'`, pr.ID).Scan(&childCount); err != nil || childCount != 1 {
+		t.Fatalf("ready replay duplicated gate: count=%d err=%v", childCount, err)
+	}
 	var gateData []byte
 	if err := s.DB.QueryRow(ctx, `SELECT data FROM outbox WHERE workflow_id=$1 AND kind='gate' AND state='pending' ORDER BY created_at DESC LIMIT 1`, pr.ID).Scan(&gateData); err != nil {
 		t.Fatalf("read pending gate action: %v", err)
@@ -139,6 +166,13 @@ func TestForceCommandsPostgresIntegration(t *testing.T) {
 	}
 	if err := json.Unmarshal(gateData, &gate); err != nil || !gate.Pass || !gate.ManualOverride || !strings.Contains(gate.Reason, "MANUAL OVERRIDE") {
 		t.Fatalf("gate outbox action must carry explicit manual override: %v", err)
+	}
+	child := setPrePRActionRunning(t, ctx, s, ready.ID+":after-ready:gate")
+	if _, err, unknown := e.performAction(ctx, child); err != nil || unknown {
+		t.Fatalf("execute child gate: err=%v unknown=%v", err, unknown)
+	}
+	if err := s.FinishAction(ctx, child, map[string]bool{"gate": true}, nil, false); err != nil {
+		t.Fatal(err)
 	}
 	for _, row := range []struct{ id, kind string }{{dev.ID, "force_accept_issue_development"}, {pr.ID, "force_accept_pr_gate"}} {
 		var count int

@@ -31,8 +31,8 @@ func TestIssueSourceHashBindsTitleAndBody(t *testing.T) {
 	if a == normalizedIssueSourceHash("Use ascending order", "Keep original order") {
 		t.Fatal("body-only change retained source identity")
 	}
-	if a != normalizedIssueSourceHash(" Use ascending\norder ", " Sort  the input ") {
-		t.Fatal("whitespace normalization differs")
+	if a == normalizedIssueSourceHash(" Use ascending\norder ", " Sort  the input ") {
+		t.Fatal("semantic whitespace change retained source identity")
 	}
 }
 
@@ -134,7 +134,7 @@ func TestIssueDiscussionAndTitlePostgresRegression(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate upgrading an existing v1 database in this owned schema.
-	if _, err = s.DB.Exec(ctx, "DELETE FROM schema_migrations WHERE version=2"); err != nil {
+	if _, err = s.DB.Exec(ctx, "DELETE FROM schema_migrations WHERE version IN (2,3)"); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Migrate(ctx); err != nil {
@@ -144,8 +144,8 @@ func TestIssueDiscussionAndTitlePostgresRegression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sourceMatchesIssue(legacy, legacy.Spec.SourceHash) || legacy.Spec.Digest != domain.SpecDigest(legacy.Spec) {
-		t.Fatal("migration changed or invalidated unchanged legacy approval")
+	if sourceMatchesIssue(legacy, legacy.Spec.SourceHash) || legacy.Spec.Digest != domain.SpecDigest(legacy.Spec) || legacy.Control != "PAUSING" || legacy.Review.Verdict != "OBSOLETE" {
+		t.Fatal("migration must invalidate lossy legacy identity while preserving the accepted spec")
 	}
 	if err = s.Save(ctx, &preUpgrade); !errors.Is(err, store.ErrStale) {
 		t.Fatalf("pre-upgrade worker can overwrite source provenance: %v", err)

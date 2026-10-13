@@ -105,7 +105,10 @@ DO $$ BEGIN
  END IF;
 END $$;
 `)
-	return e
+	if e != nil {
+		return e
+	}
+	return s.migrateIssueSourceIdentity(ctx)
 }
 func (s *Store) Inbox(ctx context.Context, id, event string, payload []byte) error {
 	if id == "" || !json.Valid(payload) {
@@ -226,8 +229,19 @@ func scan(row pgx.Row) (domain.Workflow, error) {
 func (s *Store) Get(ctx context.Context, id string) (domain.Workflow, error) {
 	return scan(s.DB.QueryRow(ctx, workflowSelect+" WHERE w.id=$1", id))
 }
+
+// List enumerates every workflow for control and reconciliation operations.
+// Presentation limits must never constrain safety-critical background work.
 func (s *Store) List(ctx context.Context) ([]domain.Workflow, error) {
-	rows, e := s.DB.Query(ctx, workflowSelect+" ORDER BY w.updated_at DESC LIMIT 200")
+	return s.list(ctx, " ORDER BY w.updated_at DESC, w.id")
+}
+
+func (s *Store) ListRecent(ctx context.Context) ([]domain.Workflow, error) {
+	return s.list(ctx, " ORDER BY w.updated_at DESC, w.id LIMIT 200")
+}
+
+func (s *Store) list(ctx context.Context, suffix string) ([]domain.Workflow, error) {
+	rows, e := s.DB.Query(ctx, workflowSelect+suffix)
 	if e != nil {
 		return nil, e
 	}

@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
+	"reflect"
 	"strings"
 )
 
 // validateSchemaDefinition accepts a deliberately small, predictable JSON
 // Schema subset. It covers the portions needed for structured reports and
 // function arguments: types, object properties/required/additionalProperties,
-// and array items.
+// array items, and enum membership.
 func validateSchemaDefinition(raw json.RawMessage) error {
 	if !json.Valid(raw) {
 		return errors.New("schema is not valid JSON")
@@ -25,6 +27,23 @@ func validateSchemaDefinition(raw json.RawMessage) error {
 	types, err := schemaTypes(schema)
 	if err != nil {
 		return err
+	}
+	if rawEnum, ok := schema["enum"]; ok {
+		values, err := schemaEnum(rawEnum)
+		if err != nil {
+			return err
+		}
+		withoutEnum := make(map[string]json.RawMessage, len(schema))
+		for k, v := range schema {
+			if k != "enum" {
+				withoutEnum[k] = v
+			}
+		}
+		for _, value := range values {
+			if err := validateSchemaValue(value, withoutEnum, "enum"); err != nil {
+				return err
+			}
+		}
 	}
 	hasObject, hasArray := false, false
 	for _, typ := range types {
@@ -171,6 +190,22 @@ func validateSchemaValue(value any, schema map[string]json.RawMessage, path stri
 	if !allowed {
 		return fmt.Errorf("%s has type %s; schema allows %s", strings.TrimSpace(path), actual, strings.Join(types, " or "))
 	}
+	if rawEnum, ok := schema["enum"]; ok {
+		values, err := schemaEnum(rawEnum)
+		if err != nil {
+			return err
+		}
+		matched := false
+		for _, candidate := range values {
+			if equalJSONValue(value, candidate) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s is not an allowed enum value", strings.TrimSpace(path))
+		}
+	}
 	if object, ok := value.(map[string]any); ok {
 		properties := map[string]json.RawMessage{}
 		if raw, exists := schema["properties"]; exists {
@@ -263,5 +298,60 @@ func jsonValueType(value any) string {
 		return "object"
 	default:
 		return "unknown"
+	}
+}
+
+func schemaEnum(raw json.RawMessage) ([]any, error) {
+	var values []any
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if err := d.Decode(&values); err != nil || len(values) == 0 {
+		return nil, errors.New("enum must be a non-empty array")
+	}
+	for i, value := range values {
+		for _, previous := range values[:i] {
+			if equalJSONValue(value, previous) {
+				return nil, errors.New("enum contains duplicate values")
+			}
+		}
+	}
+	return values, nil
+}
+
+func equalJSONValue(a, b any) bool {
+	switch x := a.(type) {
+	case json.Number:
+		y, ok := b.(json.Number)
+		if !ok {
+			return false
+		}
+		xn, xok := new(big.Rat).SetString(string(x))
+		yn, yok := new(big.Rat).SetString(string(y))
+		return xok && yok && xn.Cmp(yn) == 0
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !equalJSONValue(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			other, exists := y[k]
+			if !exists || !equalJSONValue(v, other) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(a, b)
 	}
 }

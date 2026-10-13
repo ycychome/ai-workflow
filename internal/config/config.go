@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+const DefaultWorkspaceBytes int64 = 512 << 20
+const MaxWorkspaceBytes int64 = 8 << 30
+
 type Config struct {
 	Listen      string `yaml:"listen"`
 	SetupListen string `yaml:"setup_listen"`
@@ -32,6 +35,7 @@ type Config struct {
 	Runner struct {
 		Mode                        string `yaml:"mode"`
 		Image                       string `yaml:"image"`
+		WorkspaceBytes              int64  `yaml:"workspace_bytes"`
 		Builders                    int    `yaml:"builders"`
 		Reviewers                   int    `yaml:"reviewers"`
 		WorkflowConcurrency         int    `yaml:"workflow_concurrency"`
@@ -65,6 +69,7 @@ func Load(path string) (Config, error) {
 	c := Config{Listen: "127.0.0.1:8080", SetupListen: "127.0.0.1:8081", DataDir: "./data"}
 	c.Runner.Mode = "responses"
 	c.Runner.Image = "ai-workflow-runner:local"
+	c.Runner.WorkspaceBytes = DefaultWorkspaceBytes
 	c.Runner.Builders = 2
 	c.Runner.Reviewers = 2
 	c.Runner.WorkflowConcurrency = 2
@@ -79,6 +84,23 @@ func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return c, err
+	}
+	// yaml.v3 otherwise silently truncates floating-point scalars into int64.
+	// A filesystem capacity must be an exact integral number of bytes.
+	var rawQuota struct {
+		Runner struct {
+			WorkspaceBytes any `yaml:"workspace_bytes"`
+		} `yaml:"runner"`
+	}
+	if err = yaml.Unmarshal(b, &rawQuota); err != nil {
+		return c, err
+	}
+	if rawQuota.Runner.WorkspaceBytes != nil {
+		switch rawQuota.Runner.WorkspaceBytes.(type) {
+		case int, int64, uint64:
+		default:
+			return c, errors.New("runner.workspace_bytes must be an integer number of bytes")
+		}
 	}
 	if err = yaml.Unmarshal(b, &c); err != nil {
 		return c, err
@@ -97,6 +119,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.Runner.Builders < 1 || c.Runner.Builders > 2 || c.Runner.Reviewers < 1 || c.Runner.Reviewers > 2 {
 		return c, errors.New("MVP allows 1 or 2 builders/reviewers")
+	}
+	if !ValidWorkspaceBytes(c.Runner.WorkspaceBytes) {
+		return c, errors.New("runner.workspace_bytes must be between 1 and 8589934592 bytes (8 GiB)")
 	}
 	if !ValidWorkflowConcurrency(c.Runner.WorkflowConcurrency) {
 		return c, errors.New("runner.workflow_concurrency must be between 1 and 4")
@@ -155,3 +180,14 @@ func (c Config) ModelReady() bool {
 func (c Config) AttemptTimeout() time.Duration {
 	return time.Duration(c.Runner.AttemptMinutes) * time.Minute
 }
+
+// Programmatic zero-value configs retain the same bounded default as omitted YAML.
+// Load separately rejects an explicitly configured zero or negative capacity.
+func (c Config) EffectiveWorkspaceBytes() int64 {
+	if c.Runner.WorkspaceBytes == 0 {
+		return DefaultWorkspaceBytes
+	}
+	return c.Runner.WorkspaceBytes
+}
+
+func ValidWorkspaceBytes(n int64) bool { return n > 0 && n <= MaxWorkspaceBytes }

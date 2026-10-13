@@ -64,6 +64,7 @@ func TestConfigInvalidationPreservesControlPostgresIntegration(t *testing.T) {
 	}{
 		{"model", func(c *config.Config) { c.Model.Dev = "new-dev-model" }},
 		{"runner", func(c *config.Config) { c.Runner.Image = "runner:changed" }},
+		{"workspace quota", func(c *config.Config) { c.Runner.WorkspaceBytes = 64 << 20 }},
 		{"repository", func(c *config.Config) { c.Repositories = []config.Repository{{Name: "example/pilot", ID: 731991}} }},
 	}
 	baseRepo := int64(time.Now().UnixNano() % 1_000_000_000)

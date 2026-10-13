@@ -59,6 +59,58 @@ repair flow and stops at `AWAITING_MAINTAINER`. It does not call GitHub or a
 real model. A demonstration run is not evidence that real-model quality or
 GitHub delivery has passed acceptance.
 
+## Workspace capacity and cleanup
+
+Configure the per-workspace capacity in `secrets/config.yaml`:
+
+```yaml
+runner:
+  workspace_bytes: 536870912 # 512 MiB, including source and build output
+```
+
+The value must be an integer from 1 through `8589934592` bytes (8 GiB). Omitting
+it selects 512 MiB; explicit zero, negative, fractional and out-of-range values
+are rejected. The quota covers `/workspace`, including source, `.git`, caches
+and files produced by commands. A full workspace causes writes to fail; choose
+an appropriate limit for the repository instead of treating a failed command
+as successful verification. Other runner limits, including container memory,
+still apply independently.
+
+The Settings API returns the effective `runner.workspace_bytes`. Saving unrelated
+web settings preserves the configured capacity. The API accepts the field with
+the same bounds, but the dashboard has no dedicated capacity input. For a YAML
+edit, restart the control process in the usual controlled maintenance window so
+it loads the new value. Changing capacity through the running engine replaces
+its manager, invalidates affected generations and verification keys, and leaves
+existing workspace handles with their original manager for cleanup. Old passing
+checks must be reverified under the new resource configuration.
+
+Each workspace uses a Docker local named volume backed by tmpfs with an enforced
+size limit and an inode limit of `max(1024, workspace_bytes / 16384)` (32,768 at
+the default capacity). The inode cap also bounds directories and empty files.
+A keeper container keeps that volume mounted between the temporary
+containers used for file reads, commands and snapshots; without it, unmounting
+the tmpfs would discard the workspace between tool calls. The keeper is part of
+the workspace lifetime and is removed along with its volume during normal
+cleanup. It is not a persistent source or backup volume. After an abrupt control
+or Docker failure, inspect controller-owned workspace keepers and volumes and
+confirm no active attempt owns them before removing orphaned resources. Do not
+remove PostgreSQL, control-data volumes or another process's active workspaces.
+
+Stopping or restarting a keeper invalidates that workspace. The controller binds
+both the keeper incarnation and the filesystem identity, so an empty remount is
+not accepted as the original source tree. Cleanup has a 20-second deadline;
+failed cleanup retains its handle for retry. Archive exports over their separate
+256 MiB limit fail instead of returning partial file lists.
+
+Tmpfs uses the Docker host's RAM and potentially swap. For Colima, budget within
+the VM's memory/swap allocation. Concurrent workspaces can each grow to their
+configured cap, so account for their aggregate use alongside runner process
+memory. A keeper does not eliminate that cost. Docker environments that cannot
+mount the bounded tmpfs volume or satisfy its setup checks reject workspace
+creation. The controller does not silently substitute an unbounded ordinary
+volume.
+
 ## GitHub App setup and webhook tunnel
 
 Sign in to the dashboard first, then use the **GitHub App registration** button

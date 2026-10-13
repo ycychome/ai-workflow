@@ -34,13 +34,25 @@ type Engine struct {
 }
 
 func New(s *store.Store, c config.Config) (*Engine, error) {
-	m, e := sandbox.NewManager(sandbox.Options{RunnerImage: c.Runner.Image})
+	c.Runner.WorkspaceBytes = c.EffectiveWorkspaceBytes()
+	if !config.ValidWorkspaceBytes(c.Runner.WorkspaceBytes) {
+		return nil, errors.New("invalid runner workspace capacity")
+	}
+	m, e := sandbox.NewManager(sandbox.Options{RunnerImage: c.Runner.Image, WorkspaceBytes: c.Runner.WorkspaceBytes})
 	if e != nil {
 		return nil, e
 	}
 	return &Engine{Store: s, Sandbox: m, cfg: c, active: map[string]context.CancelFunc{}, owner: fmt.Sprintf("control-%d-%d", os.Getpid(), time.Now().UnixNano())}, nil
 }
 func (e *Engine) Config() config.Config { e.mu.RLock(); defer e.mu.RUnlock(); return e.cfg }
+
+// Capture once for each workspace lifetime. Configuration changes may install
+// another manager, but existing handles remain owned by their original manager.
+func (e *Engine) sandboxManager() *sandbox.Manager {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.Sandbox
+}
 func (e *Engine) Invalidate(ctx context.Context, reason string) error {
 	ws, err := e.Store.List(ctx)
 	if err != nil {
@@ -64,7 +76,11 @@ func (e *Engine) Invalidate(ctx context.Context, reason string) error {
 	return nil
 }
 func (e *Engine) SetConfig(ctx context.Context, c config.Config) error {
-	m, err := sandbox.NewManager(sandbox.Options{RunnerImage: c.Runner.Image})
+	c.Runner.WorkspaceBytes = c.EffectiveWorkspaceBytes()
+	if !config.ValidWorkspaceBytes(c.Runner.WorkspaceBytes) {
+		return errors.New("invalid runner workspace capacity")
+	}
+	m, err := sandbox.NewManager(sandbox.Options{RunnerImage: c.Runner.Image, WorkspaceBytes: c.Runner.WorkspaceBytes})
 	if err != nil {
 		return err
 	}
@@ -72,7 +88,7 @@ func (e *Engine) SetConfig(ctx context.Context, c config.Config) error {
 	old := e.cfg
 	e.cfg = c
 	e.app = nil
-	if old.Runner.Image != c.Runner.Image {
+	if old.Runner.Image != c.Runner.Image || old.EffectiveWorkspaceBytes() != c.EffectiveWorkspaceBytes() {
 		e.Sandbox = m
 	}
 	e.mu.Unlock()
@@ -80,7 +96,8 @@ func (e *Engine) SetConfig(ctx context.Context, c config.Config) error {
 	if err != nil {
 		return err
 	}
-	changed := domain.Digest(old.Repositories) != domain.Digest(c.Repositories) || old.Runner.Image != c.Runner.Image || old.Runner.Mode != c.Runner.Mode || domain.Digest(old.Model) != domain.Digest(c.Model)
+	quotaChanged := old.EffectiveWorkspaceBytes() != c.EffectiveWorkspaceBytes()
+	changed := quotaChanged || domain.Digest(old.Repositories) != domain.Digest(c.Repositories) || old.Runner.Image != c.Runner.Image || old.Runner.Mode != c.Runner.Mode || domain.Digest(old.Model) != domain.Digest(c.Model)
 	configurationReady := c.Runner.Mode != "responses" || c.ModelReady()
 	for _, w := range ws {
 		if w.Phase == "WAITING_CONFIGURATION" {
@@ -394,7 +411,10 @@ func (e *Engine) imageDigest(ctx context.Context) string {
 func (e *Engine) key(ctx context.Context, w domain.Workflow) string {
 	cfg := e.Config()
 	r, _ := cfg.Repository(w.Repository)
-	return domain.VerificationKey(w, domain.Digest(r), domain.Digest(r.Verification), e.imageDigest(ctx))
+	// Resource limits are part of the verification profile: a pass obtained
+	// under another workspace capacity cannot authorize this configuration.
+	profile := domain.Digest([]any{r.Verification, cfg.EffectiveWorkspaceBytes()})
+	return domain.VerificationKey(w, domain.Digest(r), profile, e.imageDigest(ctx))
 }
 func (e *Engine) source(ctx context.Context, w domain.Workflow, sha string) (map[string]sandbox.File, error) {
 	if w.Repository == "local/pilot" {
@@ -442,7 +462,10 @@ func (e *Engine) repository(w domain.Workflow) config.Repository {
 	return r
 }
 func (e *Engine) artifact(ctx context.Context, w domain.Workflow, id, kind string, data any) (domain.Evidence, error) {
-	b, _ := json.MarshalIndent(data, "", "  ")
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return domain.Evidence{}, fmt.Errorf("encode evidence: %w", err)
+	}
 	directory := e.Config().DataDir + "/evidence/" + w.ID
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return domain.Evidence{}, err
@@ -451,7 +474,7 @@ func (e *Engine) artifact(ctx context.Context, w domain.Workflow, id, kind strin
 	if err := os.WriteFile(file, b, 0600); err != nil {
 		return domain.Evidence{}, err
 	}
-	ev := domain.Evidence{ID: id, Kind: kind, Path: file, Hash: domain.Digest(data), CreatedAt: time.Now().UTC(), BaseSHA: w.BaseSHA, HeadSHA: w.HeadSHA, ProfileDigest: domain.Digest(e.repository(w).Verification)}
+	ev := domain.Evidence{ID: id, Kind: kind, Path: file, Hash: domain.Digest(data), CreatedAt: time.Now().UTC(), BaseSHA: w.BaseSHA, HeadSHA: w.HeadSHA, ProfileDigest: domain.Digest([]any{e.repository(w).Verification, e.Config().EffectiveWorkspaceBytes()})}
 	return ev, nil
 }
 func (e *Engine) Demo(ctx context.Context) (domain.Workflow, error) {

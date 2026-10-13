@@ -1,7 +1,6 @@
 package orchestration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,6 +29,10 @@ type gateActionData struct {
 	SHA            string `json:"sha,omitempty"`
 	ManualOverride bool   `json:"manual_override,omitempty"`
 }
+type readyActionData struct {
+	GateAfterReady *gateActionData `json:"gate_after_ready,omitempty"`
+}
+
 type publishActionData struct {
 	Changes        []gh.FileChange `json:"changes"`
 	TaskIDs        []string        `json:"task_ids"`
@@ -307,16 +310,13 @@ func (e *Engine) createIntake(ctx context.Context, repo config.Repository, insta
 
 func normalizedIssueHash(s string) string { return domain.Digest(strings.Join(strings.Fields(s), " ")) }
 
-// v2 binds the complete requirement input, rather than its body alone.
+// v3 preserves semantic whitespace (code indentation, literal strings, Markdown).
+// Only CRLF is normalized because GitHub/editor transports may change line endings.
 func normalizedIssueSourceHash(title, body string) string {
-	return "issue-v2:" + domain.Digest([]string{strings.Join(strings.Fields(title), " "), strings.Join(strings.Fields(body), " ")})
+	return "issue-v3:" + domain.Digest([]string{strings.ReplaceAll(title, "\r\n", "\n"), strings.ReplaceAll(body, "\r\n", "\n")})
 }
 func sourceMatchesIssue(w domain.Workflow, hash string) bool {
-	if hash == normalizedIssueSourceHash(w.IssueTitle, w.IssueBody) {
-		return true
-	}
-	// Legacy source digests remain valid only for the persisted original title.
-	return w.LegacyIssueTitle != nil && strings.Join(strings.Fields(w.IssueTitle), " ") == strings.Join(strings.Fields(*w.LegacyIssueTitle), " ") && hash == normalizedIssueHash(w.IssueBody)
+	return hash == normalizedIssueSourceHash(w.IssueTitle, w.IssueBody)
 }
 
 func (e *Engine) workflowForPR(ctx context.Context, repositoryID int64, number int) (domain.Workflow, error) {
@@ -336,8 +336,13 @@ func (e *Engine) issueEdited(ctx context.Context, w domain.Workflow, issue *gh.I
 	if normalizedIssueSourceHash(w.IssueTitle, w.IssueBody) == normalizedIssueSourceHash(issue.Title, issue.Body) {
 		return nil
 	}
-	e.stop(w.ID)
-	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+	e.mu.RLock()
+	cancelWorker := e.active[w.ID]
+	e.mu.RUnlock()
+	err := e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if x.Version != w.Version || x.Generation != w.Generation {
+			return nil, store.ErrStale
+		}
 		if normalizedIssueSourceHash(x.IssueTitle, x.IssueBody) == normalizedIssueSourceHash(issue.Title, issue.Body) {
 			return nil, store.ErrNoChange
 		}
@@ -355,6 +360,10 @@ func (e *Engine) issueEdited(ctx context.Context, w domain.Workflow, issue *gh.I
 		x.LastError = "Issue changed; after controls settle, use /ai analyze to review the edit. The accepted specification remains unchanged until a proposal is explicitly accepted."
 		return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 	})
+	if err == nil && cancelWorker != nil {
+		cancelWorker()
+	}
+	return err
 }
 
 func (e *Engine) issueComment(ctx context.Context, w domain.Workflow, commentID int64, actor, actorType, body string) error {
@@ -561,6 +570,9 @@ func (e *Engine) Command(ctx context.Context, workflowID, actor, command string,
 			return e.resumeSkepticCheckpoint(ctx, refreshed, currentKey)
 		}
 		return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+			if x.Version != refreshed.Version || x.Generation != refreshed.Generation {
+				return nil, store.ErrStale
+			}
 			x.Generation++
 			x.Control = "ACTIVE"
 			x.LastError = ""
@@ -691,7 +703,7 @@ func analyzeAllowed(w domain.Workflow) bool {
 	switch w.Phase {
 	case "INTAKE", "NEEDS_INFO":
 		return w.Control == "ACTIVE" || w.Control == "PAUSED"
-	case "TRIAGE", "SPEC_READY", "DEFERRED", "REJECT_PROPOSED", "REJECTED", "BLOCKED":
+	case "TRIAGE", "SPEC_READY", "DEFERRED", "REJECT_PROPOSED", "REJECTED", "BLOCKED", "WAITING_CONFIGURATION":
 		return w.Control != "ACTIVE" && (!w.Spec.Approved || !sourceMatchesIssue(w, w.Spec.SourceHash))
 	default:
 		return w.Spec.Approved && !sourceMatchesIssue(w, w.Spec.SourceHash) && w.Control == "PAUSED"
@@ -917,10 +929,14 @@ func (e *Engine) forceAcceptPR(ctx context.Context, w domain.Workflow, actor str
 		x.Review.Reason = "MANUAL OVERRIDE by " + actor + " via /ai forceaccept; review and automatic verification were bypassed. A maintainer must still merge the PR."
 		x.ForceApproval = &domain.ForceApproval{Kind: "pr_merge_gate", Actor: actor, Command: "forceaccept", ApprovedAt: now, Generation: x.Generation, SpecDigest: x.Spec.Digest, PolicyDigest: domain.Digest(policy), VerificationKey: key, BaseSHA: x.BaseSHA, HeadSHA: x.HeadSHA, Bypassed: bypassed}
 		x.LastError = x.Review.Reason
-		gate := store.NewAction(*x, "gate", gateActionData{Pass: true, Reason: x.Review.Reason, Key: key, SHA: x.HeadSHA, ManualOverride: true})
-		actions := []store.Action{gate, statusAction(*x)}
+		gateData := gateActionData{Pass: true, Reason: x.Review.Reason, Key: key, SHA: x.HeadSHA, ManualOverride: true}
+		actions := []store.Action{statusAction(*x)}
 		if !x.PRReady {
-			actions = append([]store.Action{store.NewAction(*x, "ready", map[string]any{})}, actions...)
+			// Do not rely on insertion order: equal-time actions are sorted by ID.
+			// The successful gate is created atomically with the ready receipt.
+			actions = append(actions, store.NewAction(*x, "ready", readyActionData{GateAfterReady: &gateData}))
+		} else {
+			actions = append(actions, store.NewAction(*x, "gate", gateData))
 		}
 		return actions, nil
 	})
@@ -963,6 +979,11 @@ func findingIDs(findings []domain.Finding) []string {
 }
 
 func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event gh.WebhookEvent) error {
+	var err error
+	w, err = e.Store.Get(ctx, w.ID)
+	if err != nil {
+		return err
+	}
 	c, o, r, err := e.client(ctx, w)
 	if err != nil {
 		return err
@@ -982,6 +1003,11 @@ func (e *Engine) pullRequestEvent(ctx context.Context, w domain.Workflow, event 
 	}
 	pr := &latest
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		// Returning ErrStale keeps this inbox delivery retryable; its next
+		// attempt reads the remote PR again instead of replaying this snapshot.
+		if x.Version != w.Version || x.Generation != w.Generation {
+			return nil, store.ErrStale
+		}
 		if pr.Merged {
 			if x.Phase == "MERGED" && x.Control == "COMPLETED" {
 				return nil, store.ErrNoChange
@@ -1077,14 +1103,29 @@ func (e *Engine) outboxLoop(ctx context.Context) {
 			}
 			continue
 		}
-		if err = e.Store.StartAction(ctx, a); err != nil {
-			_ = e.Store.AbandonAction(context.WithoutCancel(ctx), a, err.Error())
-			continue
-		}
-		receipt, effectErr, unknown := e.performAction(ctx, a)
-		if finishErr := e.Store.FinishAction(context.WithoutCancel(ctx), a, receipt, effectErr, unknown); finishErr != nil && ctx.Err() == nil {
-			e.Store.Audit(context.WithoutCancel(ctx), a.WorkflowID, "outbox_finish_error", map[string]any{"action": a.ID, "error": finishErr.Error()})
-		}
+		e.processOutboxAction(ctx, a)
+	}
+}
+
+// Leave enough of the 90-second lease for a durable receipt after cancellation.
+// A stalled GitHub request must not monopolize the single publisher forever.
+func (e *Engine) processOutboxAction(ctx context.Context, a store.Action) {
+	effectCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	err := e.Store.StartAction(effectCtx, a)
+	var receipt any
+	var unknown bool
+	if err == nil {
+		receipt, err, unknown = e.performAction(effectCtx, a)
+	}
+	cancel()
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer finishCancel()
+	if errors.Is(err, store.ErrStale) {
+		_ = e.Store.AbandonAction(finishCtx, a, err.Error())
+		return
+	}
+	if finishErr := e.Store.FinishAction(finishCtx, a, receipt, err, unknown); finishErr != nil && ctx.Err() == nil {
+		e.Store.Audit(finishCtx, a.WorkflowID, "outbox_finish_error", map[string]any{"action": a.ID, "error": finishErr.Error()})
 	}
 }
 
@@ -1136,6 +1177,11 @@ func (e *Engine) performAction(ctx context.Context, a store.Action) (any, error,
 }
 
 func (e *Engine) markPRReady(ctx context.Context, w domain.Workflow, a store.Action) (any, error, bool) {
+	var data readyActionData
+	if err := json.Unmarshal(a.Data, &data); err != nil {
+		return nil, err, false
+	}
+
 	current, err := e.Store.Get(ctx, w.ID)
 	if err != nil {
 		return nil, err, false
@@ -1149,7 +1195,7 @@ func (e *Engine) markPRReady(ctx context.Context, w domain.Workflow, a store.Act
 				return nil, store.ErrStale
 			}
 			x.PRReady = true
-			return nil, nil
+			return e.afterReadyGate(ctx, *x, a, data)
 		})
 		if err != nil {
 			return map[string]any{"local": true, "ready": true}, err, false
@@ -1167,13 +1213,22 @@ func (e *Engine) markPRReady(ctx context.Context, w domain.Workflow, a store.Act
 	if err != nil {
 		return nil, err, outcomeUnknown(err)
 	}
+	if reason := remotePRIdentityReason(current, pr); reason != "" {
+		if err := e.recordGateIdentityDrift(ctx, current, pr, reason); err != nil {
+			return nil, err, false
+		}
+		return nil, fmt.Errorf("%w: %s", store.ErrStale, reason), false
+	}
 	receipt := map[string]any{"pr": pr.Number, "draft": pr.Draft, "head_sha": pr.Head.SHA}
 	err = e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
 		if x.Generation != a.Generation || x.Control != "ACTIVE" || x.PR != current.PR {
 			return nil, store.ErrStale
 		}
+		if x.HeadSHA != current.HeadSHA || x.BaseSHA != current.BaseSHA || x.BaseBranch != current.BaseBranch || x.Branch != current.Branch {
+			return nil, store.ErrStale
+		}
 		x.PRReady = true
-		return nil, nil
+		return e.afterReadyGate(ctx, *x, a, data)
 	})
 	if err != nil {
 		return receipt, err, false
@@ -1414,38 +1469,33 @@ func (e *Engine) publishGitHub(ctx context.Context, w domain.Workflow, a store.A
 	var result gh.PublishResult
 	if branchSHA != d.ExpectedParent {
 		// A previous request may have advanced the branch before its process died.
-		// Claim only the exact single-parent commit bearing this action marker and
-		// whose resulting tree contains every requested change.
+		// Claim only the exact single-parent commit and complete requested diff;
+		// a marker alone cannot authorize additional external file changes.
 		info, infoErr := c.GetCommitInfo(ctx, owner, repo, branchSHA)
 		if infoErr != nil {
 			return nil, infoErr, false
 		}
-		if info.SHA != branchSHA || !strings.Contains(info.Message, marker) || len(info.Parents) != 1 || info.Parents[0] != d.ExpectedParent {
+		if info.SHA != branchSHA || info.Message != d.Message+"\n\n"+marker || len(info.Parents) != 1 || info.Parents[0] != d.ExpectedParent {
 			return nil, fmt.Errorf("publish branch moved: expected %s, found %s", d.ExpectedParent, branchSHA), false
+		}
+		parentArchive, archiveErr := c.GetArchive(ctx, owner, repo, d.ExpectedParent)
+		if archiveErr != nil {
+			return nil, archiveErr, false
 		}
 		archive, archiveErr := c.GetArchive(ctx, owner, repo, branchSHA)
 		if archiveErr != nil {
 			return nil, archiveErr, false
 		}
+		parentFiles, decodeErr := decodeArchive(parentArchive)
+		if decodeErr != nil {
+			return nil, decodeErr, false
+		}
 		files, decodeErr := decodeArchive(archive)
 		if decodeErr != nil {
 			return nil, decodeErr, false
 		}
-		for _, change := range d.Changes {
-			file, exists := files[change.Path]
-			if change.Delete {
-				if exists {
-					return nil, errors.New("published retry commit does not match the requested deletion"), false
-				}
-				continue
-			}
-			expectedMode := fs.FileMode(0644)
-			if change.Mode == "100755" {
-				expectedMode = 0755
-			}
-			if !exists || !bytes.Equal(file.Data, change.Content) || file.Mode.Perm() != expectedMode.Perm() {
-				return nil, fmt.Errorf("published retry commit does not match file %q", change.Path), false
-			}
+		if !publishChangesExactlyMatch(parentFiles, files, d.Changes) {
+			return nil, errors.New("published retry commit does not exactly match the requested changes"), false
 		}
 		result = gh.PublishResult{CommitSHA: branchSHA, TreeSHA: info.TreeSHA, Ref: "refs/heads/" + d.Branch}
 	} else {

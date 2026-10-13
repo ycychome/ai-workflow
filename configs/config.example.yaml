@@ -18,6 +18,7 @@ model:
 runner:
   mode: responses # fake runs deterministic fixture without API credentials
   image: ai-workflow-runner:local
+  workspace_bytes: 536870912 # 512 MiB per workspace; bounded tmpfs, valid range 1..8589934592 bytes
   builders: 2
   reviewers: 2
   workflow_concurrency: 2 # 1-4; human waiting phases do not occupy a slot

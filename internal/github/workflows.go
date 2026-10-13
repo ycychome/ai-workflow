@@ -209,14 +209,15 @@ type CommitInfo struct {
 }
 
 func (i *InstallationClient) GetCommitInfo(ctx context.Context, owner, repo, sha string) (CommitInfo, error) {
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" || strings.TrimSpace(sha) == "" {
+		return CommitInfo{}, errors.New("github: owner, repo, and commit SHA are required")
+	}
 	var response struct {
-		SHA    string `json:"sha"`
-		Commit struct {
-			Message string `json:"message"`
-			Tree    struct {
-				SHA string `json:"sha"`
-			} `json:"tree"`
-		} `json:"commit"`
+		SHA     string `json:"sha"`
+		Message string `json:"message"`
+		Tree    struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
 		Parents []struct {
 			SHA string `json:"sha"`
 		} `json:"parents"`
@@ -225,8 +226,20 @@ func (i *InstallationClient) GetCommitInfo(ctx context.Context, owner, repo, sha
 	if err != nil {
 		return CommitInfo{}, err
 	}
-	info := CommitInfo{SHA: response.SHA, Message: response.Commit.Message, TreeSHA: response.Commit.Tree.SHA}
+	if strings.TrimSpace(response.SHA) == "" || !strings.EqualFold(response.SHA, sha) {
+		return CommitInfo{}, errors.New("github: commit response SHA is empty or does not match the requested SHA")
+	}
+	if strings.TrimSpace(response.Tree.SHA) == "" {
+		return CommitInfo{}, errors.New("github: commit response tree SHA is empty")
+	}
+	if strings.TrimSpace(response.Message) == "" {
+		return CommitInfo{}, errors.New("github: commit response message is empty")
+	}
+	info := CommitInfo{SHA: response.SHA, Message: response.Message, TreeSHA: response.Tree.SHA}
 	for _, p := range response.Parents {
+		if strings.TrimSpace(p.SHA) == "" {
+			return CommitInfo{}, errors.New("github: commit response contains an empty parent SHA")
+		}
 		info.Parents = append(info.Parents, p.SHA)
 	}
 	return info, nil

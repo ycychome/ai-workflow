@@ -502,9 +502,9 @@ func (m *gateGitHubMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		info, ok := m.commits[sha]
 		m.mu.Unlock()
 		if !ok {
-			info = gh.CommitInfo{SHA: sha, TreeSHA: "tree-" + sha, Parents: []string{"parent"}}
+			info = gh.CommitInfo{SHA: sha, Message: "test commit", TreeSHA: "tree-" + sha, Parents: []string{"parent"}}
 		}
-		writeGateJSON(w, map[string]any{"sha": info.SHA, "commit": map[string]any{"message": info.Message, "tree": map[string]any{"sha": info.TreeSHA}}, "parents": gateParents(info.Parents)})
+		writeGateJSON(w, map[string]any{"sha": info.SHA, "message": info.Message, "tree": map[string]any{"sha": info.TreeSHA}, "parents": gateParents(info.Parents)})
 		return
 	}
 	if strings.HasPrefix(path, "/repos/acme/pilot/zipball/") {

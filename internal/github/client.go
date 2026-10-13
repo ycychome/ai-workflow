@@ -24,6 +24,12 @@ import (
 
 const defaultBaseURL = "https://api.github.com"
 
+// Leave room for ZIP headers above the decoded source snapshot's 64 MiB cap,
+// while bounding allocations before the archive decoder can inspect entries.
+const maxBinaryResponseBytes int64 = 128 << 20
+
+var ErrResponseTooLarge = errors.New("github: response body exceeds size limit")
+
 // Config contains GitHub App credentials and transport settings.
 type Config struct {
 	AppID         string
@@ -243,7 +249,8 @@ func (i *InstallationClient) Do(ctx context.Context, method, path string, body a
 }
 
 // DoBytes performs an authenticated REST request with a raw response body.
-// Use it for binary endpoints such as archive downloads.
+// Use it for binary endpoints such as archive downloads. Responses are capped
+// at 128 MiB, including chunked responses without a Content-Length header.
 func (i *InstallationClient) DoBytes(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	if !strings.HasPrefix(path, "/") {
 		return nil, errors.New("github: REST path must start with /")
@@ -285,9 +292,23 @@ func (c *Client) requestBytes(ctx context.Context, method, path string, body []b
 		}
 		return nil, &APIError{StatusCode: resp.StatusCode, Method: method, Path: path}
 	}
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > maxBinaryResponseBytes {
+		return nil, fmt.Errorf("%w (%d bytes)", ErrResponseTooLarge, maxBinaryResponseBytes)
+	}
+	data, err := readBoundedBytes(resp.Body, maxBinaryResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("github: read response body: %w", err)
+	}
+	return data, nil
+}
+
+func readBoundedBytes(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w (%d bytes)", ErrResponseTooLarge, limit)
 	}
 	return data, nil
 }

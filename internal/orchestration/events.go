@@ -116,6 +116,13 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 	if w.Repository == "local/pilot" {
 		return nil
 	}
+	// Fetch a current local snapshot before any remote reads. A later state
+	// change must win over the responses obtained for this snapshot.
+	var err error
+	w, err = e.Store.Get(ctx, w.ID)
+	if err != nil {
+		return err
+	}
 	c, owner, repo, err := e.client(ctx, w)
 	if err != nil {
 		return err
@@ -125,6 +132,7 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 		return err
 	}
 	var pr gh.PullRequest
+	var currentBaseSHA string
 	if w.PR > 0 {
 		pr, err = c.GetPullRequest(ctx, owner, repo, w.PR)
 		if err != nil {
@@ -137,6 +145,12 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 		}
 		if found != nil {
 			pr = *found
+		}
+	}
+	if pr.Number == 0 && w.PR == 0 && w.Spec.Approved && w.BaseBranch != "" && w.BaseSHA != "" {
+		currentBaseSHA, err = c.GetBranchSHA(ctx, owner, repo, w.BaseBranch)
+		if err != nil {
+			return fmt.Errorf("read target branch before PR creation: %w", err)
 		}
 	}
 	var ownPublish bool
@@ -160,6 +174,9 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 		}
 	}
 	return e.Store.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		if x.Version != w.Version || x.Generation != w.Generation {
+			return nil, store.ErrStale
+		}
 		if normalizedIssueSourceHash(issue.Title, issue.Body) != normalizedIssueSourceHash(x.IssueTitle, x.IssueBody) {
 			x.IssueTitle = issue.Title
 			x.IssueBody = issue.Body
@@ -183,6 +200,38 @@ func (e *Engine) reconcileOne(ctx context.Context, w domain.Workflow) error {
 			// The publisher owns this exact commit and will record the PR/head/task
 			// receipt. Do not advance generation before that receipt is committed.
 			return nil, store.ErrNoChange
+		}
+		if pr.Number == 0 && currentBaseSHA != "" && currentBaseSHA != w.BaseSHA {
+			if x.Version != w.Version || x.Generation != w.Generation || x.PR != 0 || x.BaseBranch != w.BaseBranch || x.BaseSHA != w.BaseSHA {
+				return nil, store.ErrStale
+			}
+			// StartAction and Update serialize on the workflow row. Recheck running
+			// or unknown writes after acquiring that lock so a landed publish/PR
+			// receipt wins before rebasing this workflow.
+			pending, pendingErr := e.Store.PendingWrites(ctx, x.ID)
+			if pendingErr != nil {
+				return nil, pendingErr
+			}
+			if pending > 0 {
+				return nil, store.ErrNoChange
+			}
+			x.Generation++
+			x.BaseSHA = currentBaseSHA
+			x.HeadSHA = currentBaseSHA
+			x.Branch = fmt.Sprintf("codex/issue-%d-g%d", x.Issue, x.Generation)
+			x.PRReady = false
+			x.CheckID = 0
+			x.CheckSHA = ""
+			x.GateStatus = ""
+			x.GateConclusion = ""
+			x.Tasks = nil
+			x.Evidence = nil
+			x.TestedSHA = ""
+			x.TestedTreeSHA = ""
+			x.Review = domain.Review{Verdict: "OBSOLETE"}
+			x.Phase = "PLANNING"
+			x.LastError = "target base moved before a pull request existed; stale tasks, evidence, and publish actions were retired for replanning against the new base"
+			return []store.Action{gateAction(*x, false, x.LastError), statusAction(*x)}, nil
 		}
 		if x.PR == 0 {
 			if pr.Number == 0 {

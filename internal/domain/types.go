@@ -215,6 +215,9 @@ func Gate(w Workflow, key string) (bool, string) {
 		}
 	}
 	for _, f := range w.Review.Findings {
+		if err := ValidateFindingEnums(f, true); err != nil {
+			return false, "invalid finding " + f.ID + ": " + err.Error()
+		}
 		if f.Severity == "critical" || f.Severity == "high" || f.Severity == "medium" {
 			if f.State != "REFUTED" && f.State != "RESOLVED" {
 				return false, "unresolved finding " + f.ID
@@ -222,4 +225,29 @@ func Gate(w Workflow, key string) (bool, string) {
 		}
 	}
 	return true, "current candidate meets all mandatory obligations"
+}
+
+// Internal verification may retain FIX_CANDIDATE while a changed candidate awaits review.
+// Model reports are restricted to the public report states.
+func ValidateFindingEnums(f Finding, internal bool) error {
+	switch f.Severity {
+	case "critical", "high", "medium", "low", "info":
+	default:
+		return fmt.Errorf("invalid severity %q", f.Severity)
+	}
+	switch f.EvidenceType {
+	case "MODEL_CLAIM", "SOURCE_ANALYSIS", "TOOL_VERIFIED":
+	default:
+		return fmt.Errorf("invalid evidence type %q", f.EvidenceType)
+	}
+	switch f.State {
+	case "PROPOSED", "CONFIRMED", "REFUTED", "DISPUTED", "RESOLVED":
+	case "FIX_CANDIDATE":
+		if !internal {
+			return fmt.Errorf("invalid report state %q", f.State)
+		}
+	default:
+		return fmt.Errorf("invalid state %q", f.State)
+	}
+	return nil
 }

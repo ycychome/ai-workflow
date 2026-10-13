@@ -374,13 +374,14 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 		res.err = err
 		return res
 	}
-	workspace, err := e.Sandbox.Create(ctx, id, files)
+	m := e.sandboxManager()
+	workspace, err := m.Create(ctx, id, files)
 	if err != nil {
 		res.err = err
 		return res
 	}
-	defer e.Sandbox.Destroy(context.Background(), workspace)
-	session = &toolSession{e: e, w: w, workspace: workspace, scope: task.Paths}
+	defer m.Destroy(context.Background(), workspace)
+	session = &toolSession{e: e, w: w, workspace: workspace, manager: m, scope: task.Paths}
 	if kind != "code" {
 		session.baseFiles, res.err = e.source(ctx, w, w.BaseSHA)
 		if res.err != nil {
@@ -390,7 +391,7 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 	if e.Config().Runner.Mode == "fake" {
 		original := files["calculator.go"]
 		original.Data = []byte(strings.Replace(string(original.Data), "return a - b", "return a + b", 1))
-		res.err = e.Sandbox.WriteFile(ctx, workspace, "calculator.go", original)
+		res.err = m.WriteFile(ctx, workspace, "calculator.go", original)
 		res.report = raw(map[string]any{"summary": "Fixed Add in the deterministic fixture", "rebuttals": []any{}})
 	} else {
 		tools := session.tools()
@@ -407,7 +408,7 @@ func (e *Engine) buildTask(ctx context.Context, w domain.Workflow, idx int, file
 	}
 	res.evidence = session.listEvidence()
 	if res.err == nil {
-		res.changes, res.err = e.Sandbox.CollectChanges(ctx, workspace)
+		res.changes, res.err = m.CollectChanges(ctx, workspace)
 	}
 	if res.err == nil && kind != "code" {
 		if len(res.changes) != 0 {
@@ -534,15 +535,16 @@ func (e *Engine) verify(ctx context.Context, w *domain.Workflow) error {
 		w.LastError = "GitHub is computing the current test merge commit"
 		return e.Store.Save(ctx, w, statusAction(*w))
 	}
-	workspace, err := e.Sandbox.Create(ctx, fmt.Sprintf("%s-g%d-verify", w.ID, w.Generation), files)
+	m := e.sandboxManager()
+	workspace, err := m.Create(ctx, fmt.Sprintf("%s-g%d-verify", w.ID, w.Generation), files)
 	if err != nil {
 		return err
 	}
-	defer e.Sandbox.Destroy(context.Background(), workspace)
+	defer m.Destroy(context.Background(), workspace)
 	r := e.repository(*w)
 	previousFindings := append([]domain.Finding(nil), w.Review.Findings...)
 	for n, command := range r.Verification {
-		result, runErr := e.Sandbox.Run(ctx, workspace, command, e.Config().AttemptTimeout())
+		result, runErr := m.Run(ctx, workspace, command, e.Config().AttemptTimeout())
 		result.Stdout = e.redact(result.Stdout)
 		result.Stderr = e.redact(result.Stderr)
 		code := result.ExitCode
@@ -612,11 +614,11 @@ func mandatory(w domain.Workflow) []domain.Obligation {
 }
 func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 	key := e.key(ctx, *w)
-	if w.Review.Key != key || !w.Review.VerificationPassed {
+	if w.Review.Key != key || !w.Review.VerificationPassed || w.TestedSHA == "" || w.TestedTreeSHA == "" {
 		w.Phase = "VERIFYING"
 		return e.Store.Save(ctx, w, gateAction(*w, false, "review snapshot changed"))
 	}
-	files, err := e.source(ctx, *w, w.HeadSHA)
+	files, err := e.reviewSnapshot(ctx, *w)
 	if err != nil {
 		return err
 	}
@@ -634,18 +636,19 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 				w.Review.Tasks = append(w.Review.Tasks, t)
 			}
 		} else {
-			workspace, err := e.Sandbox.Create(ctx, w.ID+"-review-plan", files)
+			m := e.sandboxManager()
+			workspace, err := m.Create(ctx, w.ID+"-review-plan", files)
 			if err != nil {
 				return err
 			}
 			baseFiles, err := e.baseSnapshot(ctx, *w)
 			if err != nil {
-				e.Sandbox.Destroy(context.Background(), workspace)
+				m.Destroy(context.Background(), workspace)
 				return err
 			}
-			session := &toolSession{e: e, w: *w, workspace: workspace, review: true, baseFiles: baseFiles}
-			output, askErr := e.ask(ctx, *w, reviewPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "mandatory_obligations": baseline, "head_sha": w.HeadSHA})), session.tools(), reviewPlanSchema(), validateReviewPlanReport)
-			e.Sandbox.Destroy(context.Background(), workspace)
+			session := &toolSession{e: e, w: *w, workspace: workspace, manager: m, review: true, baseFiles: baseFiles, snapshotSHA: w.TestedSHA, snapshotTreeSHA: w.TestedTreeSHA}
+			output, askErr := e.ask(ctx, *w, reviewPlanPrompt, string(raw(map[string]any{"spec": w.Spec, "mandatory_obligations": baseline, "head_sha": w.HeadSHA, "tested_commit_sha": w.TestedSHA, "tested_tree_sha": w.TestedTreeSHA})), session.tools(), reviewPlanSchema(), validateReviewPlanReport)
+			m.Destroy(context.Background(), workspace)
 			w.Evidence = append(w.Evidence, session.listEvidence()...)
 			if askErr != nil {
 				return askErr
@@ -836,12 +839,13 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 	if err := e.Store.AttemptOwned(ctx, id, w.ID, task.ID, w.Generation, task.LeaseEpoch, w.LeaseOwner, "RUNNING", nil, nil); err != nil {
 		return reviewReport{}, nil, err
 	}
-	workspace, err := e.Sandbox.Create(ctx, id, files)
+	m := e.sandboxManager()
+	workspace, err := m.Create(ctx, id, files)
 	if err != nil {
 		return reviewReport{}, nil, err
 	}
-	defer e.Sandbox.Destroy(context.Background(), workspace)
-	session = &toolSession{e: e, w: w, workspace: workspace, review: true}
+	defer m.Destroy(context.Background(), workspace)
+	session = &toolSession{e: e, w: w, workspace: workspace, manager: m, review: true, snapshotSHA: w.TestedSHA, snapshotTreeSHA: w.TestedTreeSHA}
 	baseFiles, err := e.baseSnapshot(ctx, w)
 	if err != nil {
 		return reviewReport{}, nil, err
@@ -905,7 +909,7 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 			return report, session.listEvidence(), err
 		}
 	}
-	changes, err := e.Sandbox.CollectChanges(ctx, workspace)
+	changes, err := m.CollectChanges(ctx, workspace)
 	if err != nil {
 		return report, session.listEvidence(), err
 	}
@@ -918,14 +922,14 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 	return report, ev, nil
 }
 func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evidence []domain.Evidence, skeptic bool) error {
-	valid := map[string]bool{}
+	valid := map[string]domain.Evidence{}
 	for _, ev := range evidence {
-		valid[ev.ID] = true
+		valid[ev.ID] = ev
 	}
 	if skeptic {
 		for _, ev := range w.Evidence {
-			if ev.HeadSHA == w.HeadSHA {
-				valid[ev.ID] = true
+			if ev.HeadSHA == w.HeadSHA && ev.BaseSHA == w.BaseSHA {
+				valid[ev.ID] = ev
 			}
 		}
 	}
@@ -945,10 +949,16 @@ func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evi
 		if o.Result == "satisfied" && len(o.Evidence) == 0 {
 			return errors.New("satisfied obligation has no evidence")
 		}
+		positiveEvidence := false
 		for _, id := range o.Evidence {
-			if !valid[id] {
+			ev, exists := valid[id]
+			if !exists {
 				return fmt.Errorf("review cited nonexistent evidence %s", id)
 			}
+			positiveEvidence = positiveEvidence || evidenceSupportsSuccess(ev)
+		}
+		if o.Result == "satisfied" && !positiveEvidence {
+			return errors.New("satisfied obligation requires source analysis or a successful tool result")
 		}
 		for i := range w.Review.Obligations {
 			if w.Review.Obligations[i].ID == o.ID {
@@ -963,6 +973,9 @@ func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evi
 		}
 	}
 	for _, f := range report.Findings {
+		if err := domain.ValidateFindingEnums(f, false); err != nil {
+			return err
+		}
 		if !skeptic || f.ID == "" {
 			f.ID = "F-" + domain.Digest([]any{f.Path, f.Line, f.Description})[:10]
 		}
@@ -970,7 +983,7 @@ func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evi
 			return errors.New("finding lacks hypothesis, preconditions or expected/actual behavior")
 		}
 		for _, id := range f.Evidence {
-			if !valid[id] {
+			if _, exists := valid[id]; !exists {
 				return errors.New("finding evidence not recorded")
 			}
 		}
@@ -978,16 +991,22 @@ func mergeReport(w *domain.Workflow, report reviewReport, assigned []string, evi
 			return errors.New("finding claims unrecorded source/tool evidence")
 		}
 		if f.State == "REFUTED" || f.State == "RESOLVED" {
-			if !skeptic || len(f.Evidence) == 0 {
+			if !skeptic || !hasIndependentCounterevidence(f, domain.Finding{}, evidence) {
 				return errors.New("finding can only be refuted by independent evidence")
 			}
-		} else if f.State == "" {
-			f.State = "PROPOSED"
 		}
 		f.VerificationKey = w.Review.Key
 		found := false
 		for i := range w.Review.Findings {
 			if w.Review.Findings[i].ID == f.ID {
+				prior := w.Review.Findings[i]
+				if findingSeverityRank(f.Severity) < findingSeverityRank(prior.Severity) && prior.State != "REFUTED" && prior.State != "RESOLVED" {
+					// A severity downgrade can clear the gate just as a resolution can.
+					// Parallel reviewers cannot erase one another's blocking findings.
+					if !skeptic || !hasIndependentCounterevidence(f, prior, evidence) {
+						return errors.New("finding severity downgrade requires independent source/tool counterevidence")
+					}
+				}
 				f.History = append(w.Review.Findings[i].History, "Independent review: "+report.Summary)
 				w.Review.Findings[i] = f
 				found = true
@@ -1015,4 +1034,45 @@ func loadLocalSnapshot(directory string) (map[string]sandbox.File, error) {
 }
 func sortedChanges(changes []gh.FileChange) {
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+}
+
+func findingSeverityRank(severity string) int {
+	switch severity {
+	case "critical":
+		return 5
+	case "high":
+		return 4
+	case "medium":
+		return 3
+	case "low":
+		return 2
+	case "info":
+		return 1
+	}
+	return 6 // Unknown persisted severity must not be weakened implicitly.
+}
+
+func hasIndependentCounterevidence(f, prior domain.Finding, evidence []domain.Evidence) bool {
+	if f.EvidenceType == "MODEL_CLAIM" {
+		return false
+	}
+	priorIDs := map[string]bool{}
+	for _, id := range prior.Evidence {
+		priorIDs[id] = true
+	}
+	for _, id := range f.Evidence {
+		if priorIDs[id] {
+			continue
+		}
+		for _, ev := range evidence {
+			if ev.ID == id && evidenceSupportsSuccess(ev) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func evidenceSupportsSuccess(ev domain.Evidence) bool {
+	return ev.Kind == "SOURCE_ANALYSIS" || (ev.Kind == "TOOL_VERIFIED" && ev.ExitCode == 0)
 }
