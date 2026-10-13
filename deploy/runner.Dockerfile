@@ -12,6 +12,10 @@ RUN apt-get update \
     && useradd --uid 10001 --gid 10001 --create-home --shell /bin/sh worker \
     && mkdir -p /workspace /tmp \
     && chown -R 10001:10001 /workspace /home/worker /tmp
+# Debian login shells reset PATH; keep the pinned Go tools reachable from the
+# standard /usr/local/bin entry without changing ownership or capabilities.
+RUN ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 ENV HOME=/tmp \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \

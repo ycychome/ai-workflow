@@ -77,3 +77,15 @@ func TestChineseToolCatalog(t *testing.T) {
 		t.Fatal("unknown capability described")
 	}
 }
+
+func TestRunToolDescriptionExplainsShellAndPersistenceBoundaries(t *testing.T) {
+	description, ok := ChineseToolDescription("run")
+	if !ok {
+		t.Fatal("run tool description is missing")
+	}
+	for _, required := range []string{"参数数组", "sh -ceu", "/tmp 不跨 run 保留", "同一次 run", "获授权的工作区路径"} {
+		if !strings.Contains(description, required) {
+			t.Errorf("run tool description must include %q: %s", required, description)
+		}
+	}
+}

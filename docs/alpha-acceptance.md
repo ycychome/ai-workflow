@@ -1,6 +1,16 @@
 # Alpha 集中验收记录
 
-状态：**PR #3 已接手续验，个人 App 已安装，真实联调与 CI 诊断进行中，完整 Alpha 尚未正式放行**。实现阶段结束后统一运行测试。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
+状态：**PR #3 远端 CI 已通过；个人仓库上的真实集成探针 BLOCKED，诊断与修复仍未完成；完整 Alpha 尚未放行**。旧 pilot 不在本轮操作范围内。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
+
+## 当前接续状态（2026-10-13）
+
+- **目标身份：** 私有 `zymooll/ai-workflow-alpha-test`，repository ID `1416790756`；GitHub App ID `5285791` 的个人 installation `170932429`，范围为 `only selected repositories` 且仅选中该仓库。此前的组织仓库 `ycychome/test-repo-for-ai-test`（ID `1415305337`）是历史目标。旧 `ycychome/ai-workflow-pilot` 的维护与重置边界未改变。
+- **PR #3 CI：** head `436730ad...` 对应 run `38395066796` 的两个 job 均成功。摘要 [`../acceptance-evidence/ci-run-38395066796-summary.json`](../acceptance-evidence/ci-run-38395066796-summary.json) 显示 unit 357 passed／139 层隔离 skips，PostgreSQL 428／18，Docker 448／0；T01–T28 全部通过，`uncovered_skips` 为空。原始日志 SHA-256 为 `3ba02b31ad6f70babc484768f2e80c6893de947f10eb137eaa3956ada0ab651a`。GitHub artifact 仍因存储配额上传失败，因此不能将其描述为证据 artifact 已上传。
+- **真实探针：** `connection-T01-001` 当前关联个人测试仓库 PR #2，generation 2，累计 Issue 调用 191/200；当日累计 270/500（包含此前 79 次），并未因新库或恢复清零。工作流 BLOCKED：最后一个工具调用时剩余 20 次额度，因此尝试耗尽。Verifier 已发现候选测试 DSN 配置错误及 gofmt 问题，集成尚未修复；`testedSHA` 与 `testedTree` 均为 null。该探针不属于正式冒烟，当前没有 signed receipt、Judge 或完整 gate 证据，不能记为 PASS。
+- **尚待的运行环境工作：** Cloudflare 隧道 7844/TCP 与 7844/UDP 不可用；GitHub App 原 webhook hook 未修改。root 正在修复 runner 登录 shell 的 PATH 与 `/tmp` 说明，之后会启动独立新 probe；当前 BLOCKED 记录须保留为历史失败，不覆写。
+- **正式放行仍待：** 十项 smoke、90 项 ABC 对照、20 项 blind review、人类 labels 校核及维护者 merge 均未完成。
+
+远端 CI 通过只证明该 PR 的 CI 矩阵结果，不替代真实模型闭环、候选集成、签名回执、Judge 或人工验收。
 
 ## 已取得的本地证据
 
@@ -39,15 +49,17 @@
 
 ## 尚待完成
 
-- 真实联调目标为用户指定的 `ycychome/test-repo-for-ai-test`；用户随后改为个人账号测试仓库，已创建 `zymooll/ai-workflow-alpha-test`（`1416790756`），评估入口固定到该目标，个人 App 安装已完成并核验为仅限该仓库；真实联调进行中。旧 pilot 未重置。
+- 当前真实联调目标和最新状态见上方“当前接续状态”。组织测试仓库仅保留为历史目标；个人仓库与 App installation 已核验。
 - 真实 GitHub App／可信 CI 签发与最终门禁联调。
 - 十项真实冒烟、九十次同预算开发对照、二十个固定候选审查、维护者标签校核和人工合并。
 
 原部署已只读核验：每 Issue 200 次调用、每日 500 次、每 Issue 120 分钟、最多 2 次尝试及 2 轮修复；开发／审查模型均为 `deepseek-v4.1-flash`。价格为零表示未知，不能据此宣称免费。真实试验必须冻结有效配置，不使用本地合成测试的示例预算。
 
-本轮收尾时经 Git credential helper 只读核验，`zymooll` 对实现仓库与新测试仓库具有管理权限；新测试仓库数字 ID 为 `1415305337`。现有 App 对新仓库的安装查询返回 404，尚未验证可用安装。用户随后要求结束测试并提交 PR，因此本轮不启动新远端试验，也不执行旧仓库重置。
+**历史记录（已由个人账号测试仓库替代）：** 初次接续时曾选用组织仓库 `ycychome/test-repo-for-ai-test`（ID `1415305337`），当时 App installation 查询返回 404。随后用户改为个人私有测试仓库；上方当前状态记录了最终固定目标与 installation 身份。
 
-## 2026-10-13 PR #3 接续验收
+## 2026-10-13 PR #3 接续验收（阶段性历史日志）
+
+以下条目按当时取得证据的先后保留；其中早期目标、额度和探针阶段已被上方“当前接续状态”更新，不作为最新总述。
 
 用户在新会话要求接手完成 PR #3 验收，因此接续此前未运行的真实联调与评估。使用独立 `pr3-acceptance` 工作树；原工作树中的测试证据保留在 `dynamic-agents-alpha/acceptance-evidence/`，本轮证据保存在 `pr3-acceptance/acceptance-evidence/`。以下状态只覆盖实际取得的证据。
 
@@ -82,3 +94,14 @@
 集成失败的恢复另发现 generation 递增会使已接受来源过期；已增加严格受控的集成检查点恢复，检查当前身份、来源摘要、已停止 Agent 与无未决写入，随后仍走正常完整集成校验。真实 `/ai resume` 已验证保持 generation 1、62 次 Issue 调用和 141 次每日累计；随后来源精确发布到私有测试 [PR #2](https://github.com/zymooll/ai-workflow-alpha-test/pull/2)，提交 `6d9cbda9cf5e81ae2ac2594e5d6d8c41200e0ca5`，回归任务仍在执行。这是接线恢复证据，不是完整 Alpha 放行。
 
 远端 [run 38389966626](https://github.com/ycychome/ai-workflow/actions/runs/38389966626) 的新诊断确认 Judge 用例约 60.9 秒后发生 context deadline／UNVERIFIED，属于测试基础设施期限不足。仅 Judge Docker 测试夹具扩展为有界 3 分钟，其他安全回归仍为 60 秒；Docker 层 Go 上限 60 分钟，CI job 上限 90 分钟，其他层仍 15 分钟。真实模型配置与预算不变，超时仍不能作为候选缺陷或安全通过。修复已通过 Go 单元／静态检查与隔离 PG 恢复边界检查，远端完整复跑仍须完成。
+
+
+### 公网恢复与独立探针 002
+
+用户要求重试网络后，QUIC 公网隧道注册成功；外部 `/api/state` 和 `/setup` 返回 404，未签名 `/webhooks/github` 返回 401。备份 App 原 Webhook 配置后更新至验签代理，真实个人仓库事件得到 GitHub 202 投递回执。相同 push delivery GUID 由 GitHub 重新投递仍为 202，Inbox 前后都只有一条 processed 记录；证据为 `live-runtime-001/webhook-redelivery-proof.json`。原网络失败日志保留，先前“App hook 未改”只描述恢复前状态。
+
+运行环境修复：预装 go／gofmt 通过 `/usr/local/bin` 保持 login shell 可达；run 工具优先参数数组，shell 推荐 `sh -ceu`，说明每次 run 的 `/tmp` 独立、临时脚本须单次创建执行。真实 Docker 回归覆盖工具可用、缓存构建、失败传播、临时目录隔离与工作区持久；Go 单元／vet 及 50 项 Python 回归通过。提示版本升级为 `zh-CN/v2` 并纳入评估配置摘要，防止旧提示与新提示共用冻结配置。此修复后的完整远端 CI 须在新提交上再核验，不能沿用 `436730ad` 的绿色结果。
+
+已在原验收数据库启动新的 `connection-T01-002`，Issue #3，初始独立缺陷提交 `625e658cc201a8840933df799a8a2b9a4551c0ce`；该探针同样不计正式冒烟。启动前每日累计仍为 270 次，保留探针 001 的 191 次与先前 79 次，不提高或重置额度。新有效配置摘要 `e8710dd3e8a2565253093197085366d442ab43b9c59f94397ea66e5c2d935383`，runner 固定到镜像内容 ID；正式 90 项矩阵已按实际 API 配置重新冻结，120 项独立 Git 快照准备进行中，正式模型评估尚未运行。
+
+固定审查 PR 的 opened CI 可能早于评估 workflow 创建时间，因此管理员固定可信 CI 增加专用 `aiwf-ci-refresh` 标签触发，仅该标签可触发额外运行。宿主协调器对缺少符合时间边界 run 的精确 WAITING_CI 候选持久化一次性刷新预留，重读 PR 和候选后添加标签；仍保留完整签名、NotBefore、head/base／tree 和工作流来源校验。当前固定来源提交 `00d15a990e462cec464c89bdca15333554138d25`、blob `98365815d31fac129be799426ef3bd14c137b870`，该接线仍待实际签发与最终门禁结果证明。

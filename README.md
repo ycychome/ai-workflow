@@ -2,7 +2,7 @@
 
 以 GitHub Issue 驱动需求分诊、开发、独立审查与人工合并。Go 控制器负责持久状态、调度、无凭据沙箱、可信验证和 GitHub 写入；PostgreSQL 保存 Inbox、Outbox、任务、租约、证据及审计记录。
 
-本分支已完成 v0.4 有限 Alpha 的主要实现与本地集中验收，正在提交 PR。**真实模型、远端联调和人工验收仍未完成**，当前证据及剩余工作见[验收记录](docs/alpha-acceptance.md)。历史 MVP 的真实冒烟记录只说明当时版本的能力，不作为此分支的验收结果。
+本分支已完成 v0.4 有限 Alpha 的主要实现与本地集中验收。PR #3 已验证提交 `436730ad...` 的远端 CI 两个 job 均成功；个人私有试点 `zymooll/ai-workflow-alpha-test`（repo ID `1416790756`，installation `170932429`，仅选中该仓库）上的真实探针仍为 BLOCKED，集成诊断未完成，完整 Alpha 尚未放行。当前证据及未完成项见[验收记录](docs/alpha-acceptance.md)。历史 MVP 冒烟不作为此分支验收结果。
 
 ## 动态团队与提示词
 
@@ -39,7 +39,7 @@ Alpha 开发与验收应使用[隔离部署说明](docs/deployment-alpha.md)：�
 
 [评估协议](docs/alpha-fixture.md)定义十项真实冒烟、三配置 × 十题 × 三次的九十项同预算对照，以及二十个缺陷／修复候选。真实隐藏测试在独立可信副本中执行，Agent 工作区不包含判定素材；公开测试通过与流程判定不能代替隐藏测试真值。人工标签校核及最终人工合并分别记录。
 
-后续真实联调使用用户指定的 `ycychome/test-repo-for-ai-test`。本轮按要求结束测试并提交 PR，尚未在该仓库运行试验；评估适配器的新仓库身份接线仍待完成。旧 `ycychome/ai-workflow-pilot` 的[重置工具](docs/pilot-reset.md)保留原目标边界，不把旧仓库的历史重置授权迁移到新仓库。
+接续验收固定目标为个人私有仓库 `zymooll/ai-workflow-alpha-test`（repo ID `1416790756`），App installation `170932429` 仅选择该仓库。当前真实 PR #2 探针未通过集成验收；正式十项冒烟、九十次 A/B/C 对照、二十项盲审、人工标签与合并均待完成。旧组织仓库 `ycychome/test-repo-for-ai-test` 仅为历史目标。旧 `ycychome/ai-workflow-pilot` 的[重置工具](docs/pilot-reset.md)仍只作用于原目标，不迁移其历史重置授权。
 
 ## 文档
 

@@ -365,7 +365,7 @@ func (t *toolSession) tools() []agent.Tool {
 		{Name: "list_files", Description: "列出工作区文件；path 可设为 .", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
 		{Name: "search", Description: "搜索源码文本并取得证据 ID", Parameters: props(map[string]any{"query": str()}), Handler: t.handler},
 		{Name: "write_file", Description: "写入分配范围内的源码；审查者只能在 review_tests/ 下添加补充测试", Parameters: props(map[string]any{"path": str(), "content": str()}), Handler: t.handler},
-		{Name: "run", Description: "在隔离、无凭据、无网络的容器中执行参数数组。需要 shell 时使用 sh -lc。返回受信退出状态与日志证据。", Parameters: props(map[string]any{"args": array(str()), "timeout_seconds": map[string]any{"type": "integer"}}), Handler: t.handler},
+		{Name: "run", Description: "在隔离、无凭据、无网络的容器中执行。优先直接传参数数组，不经 shell；确需 shell 时使用 sh -ceu '命令'，不要使用 sh -lc（login shell 会重置 PATH）。每次 run 都启动新的临时容器，/tmp 不跨 run 保留；临时脚本须在同一次 run 内创建并执行。只有获授权的工作区路径在不同 run 间持久。返回受信退出状态与日志证据。", Parameters: props(map[string]any{"args": array(str()), "timeout_seconds": map[string]any{"type": "integer"}}), Handler: t.handler},
 	}
 	if len(t.readableEvidence) > 0 {
 		tools = append(tools, agent.Tool{Name: "read_evidence", Description: "读取已接受同伴报告中分配给你的证据 ID，返回通过哈希校验并脱敏的 JSON 文本预览。预览截断会明确标记；内容不全时请针对性读取源码或执行命令。read_file 不能访问控制器文件路径。引用返回的原始 evidence_id；读取行为不会产生新的独立证明，也不授予任意文件访问权。", Parameters: props(map[string]any{"evidence_id": str()}), Handler: t.handler})

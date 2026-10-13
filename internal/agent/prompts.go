@@ -159,7 +159,7 @@ func ChineseToolDescription(name string) (string, bool) {
 		"list_files":       "列出工作区文件，path 可为 .。",
 		"search":           "搜索源码文本并获得证据 ID。",
 		"write_file":       "写入分配范围内的源码；审查者仅可在 review_tests/ 写补充测试。",
-		"run":              "在隔离、无凭据且禁用网络的容器内执行参数向量。Shell 命令使用 sh -lc，返回受信退出状态及日志证据。",
+		"run":              "在隔离、无凭据且禁用网络的容器内执行。优先直接传参数数组，不经 shell；确需 shell 时使用 sh -ceu '命令'，不要使用 login shell。每次 run 都启动新的临时容器，/tmp 不跨 run 保留；临时脚本应在同一次 run 内创建并执行。只有获授权的工作区路径在不同 run 间持久。返回受信退出状态及日志证据。",
 		"read_evidence":    "按 ID 读取已接受同伴报告中分配且哈希验证的证据，返回脱敏 JSON 预览并标记截断。正文缺失时执行针对性读取或检查；控制器路径不能通过 read_file 访问。引用原始 evidence_id，读取不构成新的独立证明，也不授予任意文件访问权。",
 		"read_base_file":   "读取固定目标分支基线快照中的文件。",
 		"candidate_diff":   "读取独立计算的基线到候选版本的源码差异。",
