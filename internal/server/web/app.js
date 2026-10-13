@@ -5,7 +5,7 @@
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const phaseNames = {
     INTAKE: "待处理", TRIAGE: "需求分析", SPEC_READY: "待确认方案", PLANNING: "规划中", DEVELOPING: "开发中",
-    VERIFYING: "验证中", REVIEWING: "审查中", WAITING_CONFIGURATION: "等待配置", NEEDS_INFO: "需要补充信息",
+    VERIFYING: "验证中", REVIEWING: "审查中", WAITING_CI: "等待可信 CI", WAITING_RISK: "等待风险授权", WAITING_DAILY_BUDGET: "等待次日额度", EVALUATION_COMPLETE: "评估已完成", WAITING_CONFIGURATION: "等待配置", NEEDS_INFO: "需要补充信息",
     DEFERRED: "已暂缓", REJECT_PROPOSED: "等待覆核的拒绝建议", REJECTED: "已拒绝", CHANGES_REQUESTED: "待修复", BLOCKED: "受阻",
     READY: "待远端检查", AWAITING_MAINTAINER: "待维护者合并", MERGED: "已合并"
   };
@@ -149,8 +149,16 @@
       const data = await api("/api/state");
       state.workflows = Array.isArray(data?.workflows) ? data.workflows : [];
       state.health = data?.health || {};
+      state.agentQueue = data?.agent_queue || null;
+      state.promptVersion = data?.prompt_version || "";
       state.config = data?.config || {};
-      if (state.route?.page === "workflow-detail") state.selected = state.route.id;
+      if (state.route?.page === "workflow-detail") {
+        state.selected = state.route.id;
+        if (!state.workflows.some(workflow => workflow.id === state.route.id)) {
+          const detail = await api(`/api/workflows/${encodeURIComponent(state.route.id)}`);
+          if (detail?.workflow) state.workflows.push(detail.workflow);
+        }
+      }
       else if (state.selected && !state.workflows.some(w => w.id === state.selected)) state.selected = "";
       if (!state.authenticated) showApp();
       renderState();
@@ -216,6 +224,7 @@
       ["待合并 / 已完成", completed, "等待维护者合并或已完成", "✓"],
       ["Token 使用量", formatNumber(totalTokens), `${costText} · 输入 ${formatNumber(inputTokens)} / 输出 ${formatNumber(outputTokens)} · ${formatNumber(calls)} 次调用`, "✦"]
     ];
+    if (state.agentQueue) items.push(["智能体名额",`${state.agentQueue.occupied} / ${state.agentQueue.limit}`,`排队 ${state.agentQueue.queued} · 执行 ${state.agentQueue.active} · 停止中 ${state.agentQueue.stopping}（仍占名额）`,"◷"]);
     const container = $("#stats-grid");
     container.replaceChildren();
     for (const [label, value, note, icon] of items) {
@@ -246,7 +255,7 @@
     row.dataset.workflowId = workflow.id;
     if (workflow.id === state.selected) row.classList.add("selected");
     const first = document.createElement("td"); first.append(workflowNameCell(workflow)); row.append(first);
-    const phase = document.createElement("td"); phase.append(statusBadge(workflow.phase, phaseLabel(workflow.phase))); appendSchedulingStatus(phase, workflow, true); appendForceApprovalStatus(phase, workflow); row.append(phase);
+    const phase = document.createElement("td"); phase.append(statusBadge(workflow.phase, phaseLabel(workflow.phase))); appendSchedulingStatus(phase, workflow, true); appendForceApprovalStatus(phase, workflow); const queue=queueCounts(workflow); phase.append(el("div","muted",`智能体 ${queue.occupied}/${text(queue.limit)} · 排队 ${queue.queued}`)); row.append(phase);
     const control = document.createElement("td"); control.append(statusBadge(workflow.control, controlLabel(workflow.control))); row.append(control);
     if (detailed) {
       const gen = document.createElement("td"); gen.append(el("span", "numeric-cell", `G${text(workflow.generation, 0)} · ${workflow.pr ? `#${workflow.pr}` : "无 PR"}`)); row.append(gen);
@@ -262,7 +271,7 @@
   }
 
   function renderOverview(workflows) {
-    const signature = JSON.stringify({ selected: state.selected, rows: workflows.slice(0, 8).map(w => [w.id, w.phase, w.control, w.generation, w.model_calls, w.scheduling, w.updated_at]) });
+    const signature = JSON.stringify({ selected: state.selected, rows: workflows.slice(0, 8).map(w => [w.id, w.phase, w.control, w.generation, w.model_calls, w.scheduling, w.agent_queue, w.updated_at]) });
     if (signature === overviewSignature) return;
     overviewSignature = signature;
     const scrollY = window.scrollY;
@@ -299,7 +308,7 @@
       const searchable = `${w.repository || ""} ${w.issue || ""} ${workflowTitle(w)} ${w.id || ""}`.toLowerCase();
       return (!query || searchable.includes(query)) && (!phase || w.phase === phase) && (!control || w.control === control);
     });
-    const signature = JSON.stringify({ query, phase, control, selected: state.selected, rows: visible.map(w => [w.id, w.phase, w.control, w.generation, w.pr, w.model_calls, w.tasks?.length, w.scheduling, w.updated_at]) });
+    const signature = JSON.stringify({ query, phase, control, selected: state.selected, rows: visible.map(w => [w.id, w.phase, w.control, w.generation, w.pr, w.model_calls, w.tasks?.length, w.scheduling, w.agent_queue, w.updated_at]) });
     if (signature === workflowListSignature) return;
     workflowListSignature = signature;
     const scrollY = window.scrollY;
@@ -396,9 +405,9 @@
     notice.append(el("strong", "", title));
     notice.append(el("p", "", `操作者：${text(approval.actor, "未知")} · 时间：${formatTime(approval.approved_at)} · 代次：${text(approval.generation, "—")}`));
     if (approval.kind === "pr_merge_gate") {
-      notice.append(el("p", "", `验证身份：${text(approval.verification_key, "未提供")} · Base ${text(approval.base_sha, "—")} · Head ${text(approval.head_sha, "—")}`));
+      notice.append(el("p", "", `验证身份：${text(approval.verification_key, "未提供")} · 基线 ${text(approval.base_sha, "—")} · 候选 ${text(approval.head_sha, "—")}`));
       if (approval.bypassed?.length) notice.append(el("p", "", `本次跳过：${approval.bypassed.map(item => text(item)).join("、")}`));
-      notice.append(el("p", "", "此操作只覆盖本系统的合并门禁；GitHub 其他必需检查仍适用，实际合并仍由维护者执行。它不会把本地评审、可信验证或 Skeptic 结果标记为通过。"));
+      notice.append(el("p", "", "此操作只覆盖本系统的合并门禁；GitHub 其他必需检查仍适用，实际合并仍由维护者执行。它不会把本地评审、可信验证或质疑复核结果标记为通过。"));
     } else {
       notice.append(el("p", "", `Issue #${text(workflow.issue)} · 问题摘要身份：${text(approval.issue_hash, "未提供")} · 本次跳过：${(approval.bypassed || []).map(text).join("、") || "无"}`));
     }
@@ -434,7 +443,7 @@
     detailPair(summary, "本地评审结论", w.review?.verdict);
     detailPair(summary, "评审理由", w.review?.reason);
     detailPair(summary, "验证通过", w.review?.verification_passed ? "是" : "否");
-    detailPair(summary, "Skeptic 完成", w.review?.skeptic_complete ? "是" : "否");
+    detailPair(summary, "质疑复核完成", w.review?.skeptic_complete ? "是" : "否");
     content.append(summary);
     const reviewTasks = w.review?.tasks || [];
     content.append(el("h4", "subsection-title", `评审任务 · ${reviewTasks.length}`));
@@ -443,7 +452,7 @@
       item.append(el("strong", "", `${text(task.id, "评审任务")} · ${taskLabel(task.status)}`));
       item.append(el("p", "", text(task.description, "无任务说明")));
       if (task.paths?.length) item.append(el("p", "", `覆盖文件：${task.paths.join("、")}`));
-      item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));
+      item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · 提交 ${task.integrated_sha}` : ""}`));
       if (task.obligation_ids?.length) item.append(el("p", "", `对应义务：${task.obligation_ids.join("、")}`));
       if (task.report) item.append(reportDetails(task.report, "查看评审报告"));
       content.append(item);
@@ -578,403 +587,99 @@
     renderWorkflowDetail(workflow, tab);
   }
 
-  function flowStatus(w, node) {
-    if (node === "context") return "context";
-    const phase = w.phase || "";
-    const control = w.control || "";
-    const stage = ({ INTAKE: 0, WAITING_CONFIGURATION: 1, TRIAGE: 2, NEEDS_INFO: 2, REJECT_PROPOSED: 2,
-      REJECTED: 2, DEFERRED: 2, SPEC_READY: 3, PLANNING: 4, DEVELOPING: 5, CHANGES_REQUESTED: 5,
-      VERIFYING: 6, REVIEWING: 7, READY: 10, AWAITING_MAINTAINER: 10, MERGED: 11 })[phase] ??
-      (phase === "BLOCKED" ? (w.review?.verification_passed ? 7 : w.tasks?.length ? 5 : 2) : 0);
-    const cancelled = ["CANCELLING", "CANCELLED"].includes(control);
-    const terminalProposal = phase === "REJECT_PROPOSED";
-    const terminalStopped = ["REJECTED", "DEFERRED"].includes(phase);
-    const gateIsCurrent = Boolean(w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase());
-    const reviewCurrent = w.review?.verdict !== "OBSOLETE";
-    const reviewEligibleForGate = flowReviewEligibleForGate(w);
-    const remoteGatePassed = control === "ACTIVE" && gateIsCurrent && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() === "success";
-    const gatePassed = remoteGatePassed && reviewEligibleForGate;
-    const reviewerTasks = Array.isArray(w.review?.tasks) ? w.review.tasks : [];
-    const reviewersDone = reviewCurrent && reviewerTasks.length >= 2 && reviewerTasks.every(task => task.status === "ACCEPTED");
-    const firstIncomplete = reviewerTasks.findIndex(task => task.status !== "ACCEPTED");
-    const currentNode = phase === "WAITING_CONFIGURATION" ? "eligibility"
-      : phase === "INTAKE" ? "eligibility"
-        : ["TRIAGE", "NEEDS_INFO"].includes(phase) ? "triage"
-          : phase === "SPEC_READY" ? "spec"
-            : phase === "PLANNING" ? "plan"
-              : ["DEVELOPING", "CHANGES_REQUESTED"].includes(phase) ? (phase === "CHANGES_REQUESTED" ? "fix" : "build")
-                : phase === "VERIFYING" ? "verify"
-        : phase === "REVIEWING" ? (reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : firstIncomplete <= 1 ? (firstIncomplete === 1 ? "reviewer2" : "reviewer1") : "reviewer2")
-          : phase === "BLOCKED" ? (w.review?.verification_passed ? reviewersDone ? (w.review?.skeptic_complete ? "gate" : "skeptic") : "reviewer1" : w.tasks?.length ? (w.tasks.some(task => !["INTEGRATED", "SUPERSEDED"].includes(task.status)) ? "build" : "verify") : w.spec?.approved ? "plan" : "triage")
-            : phase === "READY" ? "gate" : ["AWAITING_MAINTAINER", "MERGED"].includes(phase) ? "human" : terminalProposal ? "maintainer-review" : "";
-    let status = "pending";
-    const completedByStage = {
-      issue: true,
-      eligibility: stage >= 2 && phase !== "WAITING_CONFIGURATION",
-      triage: stage >= 3 || ["NEEDS_INFO", "REJECT_PROPOSED", "REJECTED", "DEFERRED"].includes(phase),
-      spec: Boolean(w.spec?.approved) && phase !== "SPEC_READY",
-      plan: stage >= 5,
-      build: stage >= 6,
-      integrate: stage >= 6 && phase !== "CHANGES_REQUESTED",
-      candidate: ["VERIFYING", "REVIEWING", "READY", "AWAITING_MAINTAINER", "MERGED"].includes(phase),
-      snapshot: ["VERIFYING", "REVIEWING", "READY", "AWAITING_MAINTAINER", "MERGED"].includes(phase) && reviewCurrent,
-      "review-plan": reviewerTasks.length > 0 && reviewCurrent,
-      verify: Boolean(w.review?.verification_passed) && reviewCurrent,
-      reviewer1: reviewerTasks[0]?.status === "ACCEPTED" && reviewCurrent,
-      reviewer2: reviewerTasks[1]?.status === "ACCEPTED" && reviewCurrent,
-      skeptic: Boolean(w.review?.skeptic_complete) && reviewCurrent,
-      gate: gatePassed,
-      human: phase === "MERGED",
-      merged: phase === "MERGED"
-    };
-    if (completedByStage[node]) status = "done";
-    if (["snapshot", "review-plan"].includes(node) && !reviewCurrent && ["VERIFYING", "REVIEWING", "READY", "AWAITING_MAINTAINER", "MERGED"].includes(phase)) status = "stale";
-    if (node === "candidate" && phase === "CHANGES_REQUESTED") status = "stale";
-    if (node === "review-plan" && phase === "REVIEWING" && !reviewerTasks.length && reviewCurrent) status = "active";
-    if (node === "maintainer" && terminalProposal) status = "active";
-    if (node === "maintainer" && phase === "AWAITING_MAINTAINER") status = "active";
-    if (node === "maintainer" && control === "HUMAN_OWNED") status = "human";
-    if (node === "takeover" && control === "HUMAN_OWNED") status = "human";
-    if (node === "takeover" && (control === "BLOCKED" || phase === "BLOCKED")) status = "blocked";
-    if (node === "reviewer1" && reviewerTasks[0]?.status === "RUNNING") status = "active";
-    if (node === "reviewer2" && reviewerTasks[1]?.status === "RUNNING") status = "active";
-    if (node === "reviewer1" && reviewerTasks[0]?.status === "BLOCKED" || node === "reviewer2" && reviewerTasks[1]?.status === "BLOCKED") status = "blocked";
-    if (node === "skeptic" && phase === "REVIEWING" && reviewersDone && !w.review?.skeptic_complete) status = "active";
-    if (node === "gate" && gateIsCurrent && String(w.gate_status).toLowerCase() === "in_progress") status = "active";
-    if (node === currentNode && status !== "done") {
-      if (control === "PAUSED" || control === "PAUSING") status = "paused";
-      else if (control === "BLOCKED" || phase === "BLOCKED") status = "blocked";
-      else if (control === "HUMAN_OWNED") status = "human";
-      else if (cancelled) status = "cancelled";
-      else if (control === "ACTIVE") status = "active";
+  const roleNames = { triage: "需求分诊", dev_planner: "开发规划", planner: "规划", builder: "实现", analyst: "分析", verifier: "验证", review_planner: "审查规划", reviewer: "独立审查", skeptic: "质疑复核" };
+  const agentStatusNames = { QUEUED: "排队中", ACTIVE: "执行中", STOPPING: "停止中（仍占名额）", FINISHED: "已结束", OBSOLETE: "已过期" };
+
+  function queueCounts(workflow) {
+    if (workflow.agent_queue) return workflow.agent_queue;
+    const runs = workflow.agent_runs || [];
+    const active = runs.filter(run => run.status === "ACTIVE").length;
+    const stopping = runs.filter(run => run.status === "STOPPING").length;
+    return { active, stopping, occupied: active + stopping, queued: runs.filter(run => run.status === "QUEUED").length, limit: state.config?.runner?.workflow_agent_concurrency };
+  }
+
+  function agentQueueContent(w) {
+    const box = el("div", "agent-queue");
+    const summary = queueCounts(w);
+    box.append(el("p", "queue-summary", `本工作流占用 ${summary.occupied} / ${text(summary.limit)} · 排队 ${summary.queued} · 执行 ${summary.active} · 停止中 ${summary.stopping}`));
+    box.append(el("p", "muted", `全局上限 ${text(state.config?.runner?.agent_concurrency)} · 单工作流上限 ${text(state.config?.runner?.workflow_agent_concurrency)}。STOPPING 在进程退出确认前仍占用名额，租约过期不等于退出。`));
+    box.append(el("p", "muted", `服务当前提示词版本：${text(state.promptVersion, "未提供")}；每次运行版本以其审计记录为准。`));
+    const runs = Array.isArray(w.agent_runs) ? w.agent_runs : [];
+    if (!runs.length) box.append(el("p", "muted", "暂无智能体运行记录；任务是否执行以控制器记录为准。"));
+    for (const run of [...runs].reverse()) {
+      const details = el("details", "agent-run item-card");
+      const heading = el("summary");
+      heading.append(statusBadge(run.status, agentStatusNames[run.status] || run.status), document.createTextNode(` ${roleNames[run.role] || "角色"} (${text(run.role)}) · ${text(run.task_id)} · ${text(run.id)}`));
+      const list = el("ul", "detail-list");
+      const timestamp = value => !value || String(value).startsWith("0001-") ? "尚未记录" : formatTime(value);
+      for (const [label, value] of [
+        ["排队原因", text(run.queue_reason, "无")], ["启动原因", text(run.start_reason, "未记录")],
+        ["入队时间", timestamp(run.enqueued_at)], ["启动时间", timestamp(run.started_at)],
+        ["最近心跳", timestamp(run.heartbeat_at)], ["停止时间", timestamp(run.stopped_at)],
+        ["租约截止", timestamp(run.lease_until)], ["租约代次", run.lease_epoch], ["租约持有者", run.owner],
+        ["工作流代次 / 计划修订", `${text(run.generation)} / ${text(run.plan_revision)}`],
+        ["提示词版本", text(run.prompt_version, "未记录")], ["上下文摘要哈希", run.context_hash]
+      ]) detailPair(list, label, value);
+      details.append(heading, list);
+      box.append(details);
     }
-    if (node === "maintainer-review" && terminalProposal) status = "active";
-    if (node === "hold" && phase === "WAITING_CONFIGURATION") status = control === "ACTIVE" ? "active" : "paused";
-    if (node === "needs-info" && phase === "NEEDS_INFO") status = control === "ACTIVE" ? "active" : "paused";
-    if (node === "fix" && phase === "CHANGES_REQUESTED") status = control === "ACTIVE" ? "active" : control === "PAUSED" ? "paused" : "pending";
-    if (node === "merged" && phase === "MERGED") status = "done";
-    if (node === "spec" && phase === "SPEC_READY") status = "human";
-    if (cancelled && !completedByStage[node] && node === currentNode) status = "cancelled";
-    if ((terminalProposal || terminalStopped) && !["issue", "eligibility", "triage", "maintainer-review", "maintainer"].includes(node)) status = "pending";
-    if (gatePassed && node === "gate") status = "done";
-    if (node === "gate" && gateIsCurrent && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() !== "success") status = "blocked";
-    if (node === "gate" && w.check_sha && w.head_sha && !gateIsCurrent) status = "blocked";
-    if (node === "gate" && remoteGatePassed && !reviewEligibleForGate) status = "stale";
-    if (reviewCurrent === false && ["reviewer1", "reviewer2", "skeptic", "verify"].includes(node) &&
-        ((node === "reviewer1" && reviewerTasks[0]?.status === "ACCEPTED") ||
-          (node === "reviewer2" && reviewerTasks[1]?.status === "ACCEPTED") ||
-          (node === "skeptic" && w.review?.skeptic_complete) ||
-          (node === "verify" && w.review?.verification_passed))) status = "stale";
-    if (node === "gate" && !gatePassed && w.force_approval?.kind === "pr_merge_gate") status = w.force_approval_current === true ? "human" : "stale";
-    if (w.scheduling?.status === "queued" && status === "active") status = "pending";
-    return status;
+    return box;
   }
 
   function renderWorkflowDiagram(w) {
-    const phase = w.phase || "";
-    const terminalProposal = phase === "REJECT_PROPOSED";
     const section = el("section", "workflow-flow-section card");
-    const header = el("div", "flow-header");
-    const title = el("div");
-    title.append(el("h2", "", "双团队工作流"), el("p", "muted", `${text(w.repository)} · Issue #${text(w.issue)} · Workflow ${text(w.id)} · ${phaseLabel(w.phase)}`));
-    const controlNotes = {
-      PAUSING: "正在暂停", PAUSED: "已暂停", BLOCKED: "受阻", CANCELLING: "正在取消",
-      CANCELLED: "已取消", HUMAN_OWNED: "人工接管", COMPLETED: "已完成"
-    };
-    const needsAttention = Boolean(controlNotes[w.control]) || phase === "BLOCKED";
-    const summary = el("div", "flow-state-summary");
-    summary.append(statusBadge("muted", `当前位置：${flowCurrentLabel(w)}`));
-    summary.append(statusBadge(needsAttention ? "BLOCKED" : "muted", controlNotes[w.control] || (phase === "BLOCKED" ? "流程受阻" : controlLabel(w.control))));
-    header.append(title, summary);
-
-    const buildSvg = wide => {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", wide ? "0 0 1280 700" : "0 0 620 1032");
-    svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", `${w.repository} Issue ${w.issue} 双团队工作流：Dev Team 交付候选 PR，Review Team 独立审查，${phaseLabel(w.phase)}，${controlLabel(w.control)}`);
-    svg.classList.add("workflow-flow-svg", wide ? "workflow-flow-svg--wide" : "workflow-flow-svg--portrait");
-    const titleNode = document.createElementNS(svg.namespaceURI, "title");
-    titleNode.textContent = `${text(w.repository)} · Issue #${text(w.issue)} 双团队工作流`;
-    svg.append(titleNode);
-    const defs = document.createElementNS(svg.namespaceURI, "defs");
-    const marker = document.createElementNS(svg.namespaceURI, "marker");
-    const markerId = `workflow-flow-arrow-${wide ? "wide" : "portrait"}`;
-    marker.id = markerId;
-    marker.setAttribute("viewBox", "0 0 10 10"); marker.setAttribute("refX", "8"); marker.setAttribute("refY", "5");
-    marker.setAttribute("markerWidth", "6"); marker.setAttribute("markerHeight", "6"); marker.setAttribute("orient", "auto-start-reverse");
-    const arrow = document.createElementNS(svg.namespaceURI, "path");
-    arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "currentColor");
-    marker.append(arrow); defs.append(marker); svg.append(defs);
-
-    const frame = (x, y, width, height, cls, heading, subtitle) => {
-      const group = document.createElementNS(svg.namespaceURI, "g"); group.setAttribute("class", cls);
-      const rect = document.createElementNS(svg.namespaceURI, "rect");
-      rect.setAttribute("x", String(x)); rect.setAttribute("y", String(y)); rect.setAttribute("width", String(width));
-      rect.setAttribute("height", String(height)); rect.setAttribute("rx", "12"); group.append(rect);
-      const title = document.createElementNS(svg.namespaceURI, "text");
-      title.setAttribute("x", String(x + 12)); title.setAttribute("y", String(y + 21)); title.setAttribute("class", "flow-group-title"); title.textContent = heading; group.append(title);
-      if (subtitle) {
-        const note = document.createElementNS(svg.namespaceURI, "text");
-        note.setAttribute("x", String(x + 12)); note.setAttribute("y", String(y + 38)); note.setAttribute("class", "flow-group-note"); note.textContent = subtitle; group.append(note);
+    section.append(el("h2", "", "动态任务与依赖"), el("p", "muted", `当前阶段：${phaseLabel(w.phase)} · ${controlLabel(w.control)}。箭头表示依赖，任务数量由实际计划决定。`));
+    const all = [...(w.tasks || []).map(task => ({ ...task, team: "开发", key: `dev:${task.id}` })), ...(w.review?.tasks || []).map(task => ({ ...task, team: "审查", key: `review:${task.id}` }))];
+    const board = el("div", "dag-board");
+    for (const team of ["开发", "审查"]) {
+      const tasks = all.filter(task => task.team === team);
+      const group = el("section", "dag-team");
+      group.append(el("h3", "", `${team}任务 · ${tasks.length}`));
+      const assigned = new Set();
+      let pending = [...tasks];
+      let level = 0;
+      while (pending.length) {
+        let ready = pending.filter(task => (task.depends_on || []).every(id => assigned.has(id)));
+        const unresolved = ready.length === 0;
+        if (unresolved) ready = pending;
+        const column = el("div", "dag-level");
+        column.append(el("h4", "muted", unresolved ? "依赖尚未解析（缺失或成环）" : `依赖层 ${++level}`));
+        for (const task of ready) {
+          const item = el("article", "dag-task item-card");
+          item.id = `dag-${encodeURIComponent(task.key)}`;
+          const inferredRole = task.role || (team === "审查" ? "reviewer" : ({ analysis: "analyst", verification: "verifier" })[task.kind] || "builder");
+          item.append(el("strong", "", task.id), statusBadge(task.status, taskLabel(task.status)), el("p", "", `${roleNames[inferredRole] || inferredRole} · ${text(task.description, "无任务说明")}`));
+          const deps = el("p", "dag-dependencies");
+          deps.append(document.createTextNode("依赖："));
+          if (!(task.depends_on || []).length) deps.append(document.createTextNode("无，可在获准后调度"));
+          for (const id of task.depends_on || []) {
+            const known = tasks.some(candidate => candidate.id === id);
+            deps.append(el("span", "", `${text(id)} → ${text(task.id)}${known ? "" : "（当前计划缺失）"} `));
+          }
+          item.append(deps);
+          if (task.paths?.length) item.append(el("p", "muted", `路径：${task.paths.join("、")}`));
+          if (task.obligation_ids?.length) item.append(el("p", "muted", `验收义务：${task.obligation_ids.join("、")}`));
+          column.append(item);
+        }
+        group.append(column);
+        ready.forEach(task => assigned.add(task.id));
+        pending = pending.filter(task => !ready.includes(task));
       }
-      svg.append(group);
-    };
-    if (wide) {
-      frame(12, 12, 1256, 144, "flow-shared-frame", "外部参与与共用内核", "共享状态 / 策略 / 取消控制覆盖两队；Publisher 只执行受控写入。");
-      frame(12, 180, 612, 360, "flow-team-frame flow-dev-frame", "Dev Team", "独立源码副本 · 串行集成 · 受控交付");
-      frame(656, 180, 612, 360, "flow-team-frame flow-review-frame", "Review Team", "冻结快照 · 双 Reviewer 并行 · Skeptic 与独立验证");
-      frame(12, 560, 1256, 132, "flow-shared-frame flow-outcomes-frame", "Maintainer 控制最终结果", "只有人决定是否合并；争议和预算边界交由人工接管。");
-    } else {
-      frame(12, 12, 596, 148, "flow-shared-frame", "外部参与与共用内核", "共享状态 / 策略 / 取消控制覆盖两队；Publisher 只执行受控写入。 ");
-      frame(12, 180, 596, 304, "flow-team-frame flow-dev-frame", "Dev Team", "可写独立源码副本；澄清回 Issue，拒绝 / 延期由 Maintainer 覆核。 ");
-      frame(12, 560, 596, 320, "flow-team-frame flow-review-frame", "Review Team", "只读候选快照，不修改 PR 源码。 ");
-      frame(12, 900, 596, 120, "flow-shared-frame flow-outcomes-frame", "Maintainer 控制最终结果", "只有人决定是否合并；争议和预算边界交由人工接管。 ");
+      if (!tasks.length) group.append(el("p", "muted", "尚未形成任务计划。"));
+      board.append(group);
     }
-
-    const nodes = {
-      github: { x: 20, y: 64, width: 250, height: 42, label: "GitHub · Issue / PR / Checks", detail: "评论 / CI / webhook", status: "context" },
-      maintainer: { x: 350, y: 64, width: 250, height: 42, label: "Maintainer", detail: terminalProposal ? "拒绝 / 延期待覆核" : phase === "AWAITING_MAINTAINER" ? "复核当前版本" : w.control === "HUMAN_OWNED" ? "人工接管" : "批准 / 暂停 / 接管", status: "maintainer", tab: "review" },
-      core: { x: 82, y: 116, width: 456, height: 42, label: "Gateway · Orchestrator · Policy", detail: "Eligibility · 受控 Publisher · 状态 / 取消", status: "context" },
-      eligibility: { x: 20, y: 256, width: 126, height: 60, label: "Eligibility Gate", detail: "授权 / 入队资格", status: "eligibility", tab: "overview" },
-      triage: { x: 166, y: 256, width: 126, height: 60, label: "Dev Triage", detail: phase === "NEEDS_INFO" ? "等待需求补充" : "必要性 / 可行性", status: "triage", tab: "overview" },
-      spec: { x: 312, y: 256, width: 126, height: 60,
-        label: w.phase === "SPEC_READY" ? "等待人工接受" : w.spec?.approved_by === "ai:dev-triage" ? "AI 批准需求" : "需求审批",
-        detail: w.phase === "SPEC_READY" ? "接受后进入开发" : w.spec?.approved_by === "ai:dev-triage" ? "AI 已完成需求批准" : w.spec?.approved ? "维护者已接受" : w.proposal_spec ? "AI 提案待确认" : "等待需求分析",
-        status: "spec", tab: "overview" },
-      planner: { x: 458, y: 256, width: 126, height: 60, label: "Dev Planner + DAG", detail: `${(w.tasks || []).length} 项任务 / 依赖`, status: "plan", tab: "development" },
-      builder: { x: 458, y: 382, width: 126, height: 60, label: "Builder Pool", detail: "独立 clone / 低权限", status: "build", tab: "development" },
-      integrate: { x: 312, y: 382, width: 126, height: 60, label: "产物校验 / 集成", detail: "真实 diff · 串行验证", status: "integrate", tab: "evidence" },
-      candidate: { x: 166, y: 382, width: 126, height: 60, label: "受控 PR 交付", detail: "固定 base / head / spec", status: "candidate", tab: "development" },
-      fix: { x: 20, y: 382, width: 126, height: 60, label: "Finding 修复 / 反证", detail: phase === "CHANGES_REQUESTED" ? `第 ${number(w.fix_rounds)} 轮` : "仅 Dev 修改", status: "fix", tab: "development" },
-      snapshot: { x: 166, y: 626, width: 126, height: 60, label: "冻结审查快照", detail: "固定 Spec / Base / Head", status: "snapshot", tab: "evidence" },
-      reviewPlanner: { x: 312, y: 626, width: 126, height: 60, label: "Review Planner", detail: "独立审查义务", status: "review-plan", tab: "review" },
-      reviewDAG: { x: 458, y: 626, width: 126, height: 60, label: "Review DAG", detail: "覆盖 / 依赖 / 风险", status: "review-plan", tab: "review" },
-      reviewer1: { x: 458, y: 775, width: 126, height: 34, label: "Reviewer 1", detail: reviewMilestoneLabel(w, "reviewer1"), status: "reviewer1", tab: "review" },
-      reviewer2: { x: 458, y: 815, width: 126, height: 34, label: "Reviewer 2", detail: reviewMilestoneLabel(w, "reviewer2"), status: "reviewer2", tab: "review" },
-      skeptic: { x: 312, y: 782, width: 126, height: 60, label: "Skeptic", detail: reviewMilestoneLabel(w, "skeptic"), status: "skeptic", tab: "review" },
-      verification: { x: 166, y: 782, width: 126, height: 60, label: "独立验证", detail: reviewMilestoneLabel(w, "verify"), status: "verify", tab: "evidence" },
-      gate: { x: 20, y: 782, width: 126, height: 60, label: "Merge Gate", detail: gatePassedLabel(w), status: "gate", tab: "review" },
-      currentVersion: { x: 24, y: 952, width: 276, height: 56, label: "Gate 通过 → 当前版本复核 / 合并", detail: w.phase === "MERGED" ? "已记录实际合并" : w.pr_ready ? "PR 已 Ready for review" : "等待 Maintainer 决定", status: "human", tab: "review" },
-      takeover: { x: 320, y: 952, width: 276, height: 56, label: "争议 / 覆盖不足 / 预算耗尽 → 接管", detail: w.control === "HUMAN_OWNED" ? "HUMAN_OWNED · 自动 Writer 停止" : "需由 Maintainer 处理", status: "takeover", tab: "review" }
-    };
-    if (wide) {
-      const positions = {
-        github: [24, 62, 300, 42], maintainer: [956, 62, 288, 42], core: [388, 108, 504, 42],
-        eligibility: [20, 260, 132, 60], triage: [166, 260, 132, 60], spec: [312, 260, 132, 60], planner: [458, 260, 132, 60],
-        builder: [20, 410, 132, 60], integrate: [166, 410, 132, 60], candidate: [312, 410, 132, 60], fix: [458, 410, 132, 60],
-        snapshot: [670, 260, 132, 60], reviewPlanner: [816, 260, 132, 60], reviewDAG: [962, 260, 132, 60],
-        reviewer1: [1110, 402, 132, 34], reviewer2: [1110, 444, 132, 34], skeptic: [962, 410, 132, 60],
-        verification: [816, 410, 132, 60], gate: [670, 410, 132, 60],
-        currentVersion: [24, 622, 570, 56], takeover: [664, 622, 580, 56]
-      };
-      for (const [key, [x, y, width, height]] of Object.entries(positions)) Object.assign(nodes[key], { x, y, width, height });
-    }
-    const centerX = key => nodes[key].x + nodes[key].width / 2;
-    const centerY = key => nodes[key].y + nodes[key].height / 2;
-    const left = key => nodes[key].x;
-    const right = key => nodes[key].x + nodes[key].width;
-    const top = key => nodes[key].y;
-    const bottom = key => nodes[key].y + nodes[key].height;
-    const connector = (d, cls = "", arrowEnd = true) => {
-      const path = document.createElementNS(svg.namespaceURI, "path");
-      path.setAttribute("d", d); path.setAttribute("class", `flow-connector ${cls}`.trim());
-      if (arrowEnd) path.setAttribute("marker-end", `url(#${markerId})`); svg.append(path);
-    };
-    const edgeLabel = (label, x, y) => {
-      const textNode = document.createElementNS(svg.namespaceURI, "text");
-      textNode.setAttribute("x", String(x)); textNode.setAttribute("y", String(y));
-      textNode.setAttribute("class", "flow-edge-label"); textNode.setAttribute("text-anchor", "middle");
-      textNode.textContent = label; svg.append(textNode);
-    };
-    const forward = (a, b) => connector(`M ${right(a)} ${centerY(a)} H ${left(b)}`);
-    const backward = (a, b) => connector(`M ${left(a)} ${centerY(a)} H ${right(b)}`);
-
-    if (!wide) {
-    // Shared external/control strip; no third model team is implied.
-    connector(`M ${centerX("github")} ${bottom("github")} V ${top("core")}`);
-    connector(`M ${left("maintainer")} ${centerY("maintainer")} H ${right("github")}`);
-    edgeLabel("控制命令", 310, 77);
-    connector(`M ${left("core")} ${centerY("core")} H 8 V ${centerY("eligibility")} H ${left("eligibility")}`);
-    edgeLabel("验签 / 授权通过", 84, 171);
-
-    // Dev Team serpentine: eligibility through plan, then implementation and delivery.
-    [["eligibility", "triage"], ["triage", "spec"], ["spec", "planner"]].forEach(([a, b]) => forward(a, b));
-    connector(`M ${centerX("planner")} ${bottom("planner")} V ${top("builder")}`);
-    [["builder", "integrate"], ["integrate", "candidate"]].forEach(([a, b]) => backward(a, b));
-    connector(`M ${right("fix")} ${centerY("fix")} H 154 V 344 H 450 V ${centerY("planner")} H ${left("planner")}`);
-    edgeLabel("修复后重新规划", 302, 365);
-
-    // Dev hands a fixed candidate snapshot to Review; findings return on a separate outer route.
-    connector(`M ${centerX("candidate")} ${bottom("candidate")} V ${top("snapshot")}`);
-    edgeLabel("候选 PR：固定 base / head / spec", 397, 520);
-    forward("snapshot", "reviewPlanner");
-    forward("reviewPlanner", "reviewDAG");
-    const forkX = 600, joinX = 450;
-    connector(`M ${right("reviewDAG")} ${centerY("reviewDAG")} H ${forkX}`, "", false);
-    connector(`M ${forkX} ${centerY("reviewDAG")} V ${centerY("reviewer2")}`, "", false);
-    for (const reviewer of ["reviewer1", "reviewer2"]) {
-      connector(`M ${forkX} ${centerY(reviewer)} H ${right(reviewer)}`);
-      connector(`M ${left(reviewer)} ${centerY(reviewer)} H ${joinX}`, "", false);
-    }
-    connector(`M ${joinX} ${centerY("reviewer1")} V ${centerY("reviewer2")}`, "", false);
-    connector(`M ${joinX} ${centerY("skeptic")} H ${right("skeptic")}`);
-    backward("skeptic", "verification");
-    backward("verification", "gate");
-
-    // The outer feedback route has one explicit target: Dev's Finding fix node.
-    connector(`M ${left("gate")} ${centerY("gate")} H 8 V ${centerY("fix")} H ${left("fix")}`);
-    edgeLabel("审查反馈 → Dev 修复", 106, 520);
-    // Gate passes go to Maintainer review; uncertainty takes the independent takeover route.
-    connector(`M 52 ${bottom("gate")} V 888 H 16 V ${centerY("currentVersion")} H ${left("currentVersion")}`);
-    connector(`M 100 ${bottom("gate")} V 892 H 612 V ${centerY("takeover")} H ${right("takeover")}`);
-    } else {
-      // Shared strip: GitHub and Maintainer stay outside both independent teams.
-      connector(`M ${left("maintainer")} ${centerY("maintainer")} H ${right("github")}`);
-      edgeLabel("控制 / 当前版本复核", 638, 72);
-      connector(`M ${left("core")} ${centerY("core")} H 8 V ${centerY("eligibility")} H ${left("eligibility")}`);
-      edgeLabel("验签 / 授权通过", 92, 171);
-      connector(`M ${left("github")} ${centerY("github")} H 8 V ${centerY("core")} H ${left("core")}`);
-
-      // Dev Team: first row left-to-right; second row continues, with a bounded repair loop.
-      [["eligibility", "triage"], ["triage", "spec"], ["spec", "planner"], ["builder", "integrate"], ["integrate", "candidate"]].forEach(([a, b]) => forward(a, b));
-      connector(`M ${centerX("planner")} ${bottom("planner")} V 352 H 8 V ${centerY("builder")} H ${left("builder")}`);
-      edgeLabel("进入开发任务", 300, 382);
-      connector(`M ${right("fix")} ${centerY("fix")} H 600 V ${centerY("planner")} H ${right("planner")}`);
-      edgeLabel("修复后重新规划", 494, 370);
-
-      // The PR handoff uses the lower inter-team lane; it never crosses either team's nodes.
-      connector(`M ${centerX("candidate")} ${bottom("candidate")} V 550 H 640 V 446 M 640 434 V ${centerY("snapshot")} H ${left("snapshot")}`);
-      edgeLabel("候选 PR：固定 base / head / spec", 500, 531);
-      forward("snapshot", "reviewPlanner");
-      forward("reviewPlanner", "reviewDAG");
-
-      // Independent Reviewer fork/join on the Review Team's right side.
-      const forkX = 1248, joinX = 1100;
-      connector(`M ${right("reviewDAG")} ${centerY("reviewDAG")} H ${forkX}`, "", false);
-      connector(`M ${forkX} ${centerY("reviewDAG")} V ${centerY("reviewer2")}`, "", false);
-      for (const reviewer of ["reviewer1", "reviewer2"]) {
-        connector(`M ${forkX} ${centerY(reviewer)} H ${right(reviewer)}`);
-        connector(`M ${left(reviewer)} ${centerY(reviewer)} H ${joinX}`, "", false);
-      }
-      connector(`M ${joinX} ${centerY("reviewer1")} V ${centerY("reviewer2")}`, "", false);
-      connector(`M ${joinX} ${centerY("skeptic")} H ${right("skeptic")}`);
-      backward("skeptic", "verification");
-      backward("verification", "gate");
-
-      // Findings cross only the narrow space between team frames, targeting Dev's fix node.
-      connector(`M ${left("gate")} ${centerY("gate")} H 632 V 490 H ${centerX("fix")} V ${bottom("fix")}`, "flow-loop");
-      edgeLabel("Finding / 修复请求 → Dev", 736, 390);
-      // Gate outcomes leave Review for the Maintainer-controlled strip below both teams.
-      connector(`M 704 ${bottom("gate")} V 606 H ${centerX("currentVersion")} V ${top("currentVersion")}`);
-      connector(`M 764 ${bottom("gate")} V 614 H ${centerX("takeover")} V ${top("takeover")}`);
-    }
-
-    const nodeStatusName = { done: "已完成", active: "当前步骤", pending: "待执行", paused: "已暂停", blocked: "受阻", human: "人工控制", cancelled: "已取消", stale: "历史 / 待重审", context: "共享组件" };
-    for (const [key, node] of Object.entries(nodes)) {
-      const group = document.createElementNS(svg.namespaceURI, "g");
-      const status = flowStatus(w, node.status);
-      group.setAttribute("class", `flow-node is-${status}`); group.dataset.flowNode = key;
-      const accessible = `${node.label}，${node.detail}，${nodeStatusName[status] || status}`;
-      group.setAttribute("aria-label", accessible);
-      if (node.tab) {
-        group.setAttribute("role", "link"); group.setAttribute("tabindex", "0"); group.dataset.flowTab = node.tab;
-        const go = () => navigate(`/workflows/${encodeURIComponent(w.id)}/${node.tab}`);
-        group.addEventListener("click", go);
-        group.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); go(); } });
-      }
-      const title = document.createElementNS(svg.namespaceURI, "title"); title.textContent = accessible; group.append(title);
-      const rect = document.createElementNS(svg.namespaceURI, "rect");
-      rect.setAttribute("x", String(node.x)); rect.setAttribute("y", String(node.y)); rect.setAttribute("width", String(node.width));
-      rect.setAttribute("height", String(node.height)); rect.setAttribute("rx", "8"); group.append(rect);
-      const textNode = document.createElementNS(svg.namespaceURI, "text");
-      textNode.setAttribute("x", String(centerX(key))); textNode.setAttribute("y", String(node.y + (node.height < 44 ? 15 : 20)));
-      textNode.setAttribute("text-anchor", "middle");
-      const label = document.createElementNS(svg.namespaceURI, "tspan"); label.setAttribute("x", String(centerX(key)));
-      label.setAttribute("class", "flow-node-label"); label.textContent = node.label;
-      const detail = document.createElementNS(svg.namespaceURI, "tspan"); detail.setAttribute("x", String(centerX(key)));
-      detail.setAttribute("dy", "15"); detail.setAttribute("class", "flow-node-detail"); detail.textContent = node.detail;
-      textNode.append(label, detail); group.append(textNode); svg.append(group);
-    }
-    return svg;
-    };
-    const diagramViewport = el("div", "flow-diagram-viewport");
-    diagramViewport.append(buildSvg(false), buildSvg(true));
-    const locatorTarget = () => {
-      const visibleSvg = Array.from(diagramViewport.querySelectorAll(".workflow-flow-svg")).find(node => node.getClientRects().length);
-      return phase === "MERGED" ? visibleSvg?.querySelector('[data-flow-node="currentVersion"]') : visibleSvg?.querySelector('.is-active, .is-paused, .is-blocked, .is-human, .is-cancelled');
-    };
-    const locate = el("button", "text-button flow-locate", "定位当前步骤");
-    locate.type = "button";
-    locate.addEventListener("click", () => locatorTarget()?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }));
-    summary.append(locate);
-    const note = el("p", "flow-note", flowStateNote(w));
-    const legend = el("div", "flow-legend");
-    [["done", "已完成"], ["active", "当前步骤"], ["pending", "待执行"], ["paused", "暂停中"], ["blocked", "受阻 / 待确认"], ["stale", "历史 / 待重审"], ["human", "人工控制"], ["cancelled", "已取消"]].forEach(([cls, label]) => {
-      const item = el("span", "flow-legend-item"); item.append(el("i", `flow-legend-dot is-${cls}`), el("span", "", label)); legend.append(item);
-    });
-    section.append(header, diagramViewport, note, legend);
+    section.append(board, el("p", "muted", flowStateNote(w)));
     return section;
-  }
-
-  function gatePassedLabel(w) {
-    const checkCurrent = Boolean(w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase());
-    const remotePassed = checkCurrent && w.control === "ACTIVE" && String(w.gate_status).toLowerCase() === "completed" && String(w.gate_conclusion).toLowerCase() === "success";
-    if (remotePassed && flowReviewEligibleForGate(w)) return "成功";
-    if (w.force_approval?.kind === "pr_merge_gate" && w.force_approval_current === true) return "人工强制放行";
-    if (w.force_approval?.kind === "pr_merge_gate") return "历史强制放行";
-    if (w.check_sha && w.head_sha && !checkCurrent) return "旧提交";
-    if (!w.check_sha || !w.head_sha) return "尚未确认";
-    if (w.check_sha.toLowerCase() !== w.head_sha.toLowerCase()) return "旧提交";
-    if (remotePassed && w.review?.verdict === "OBSOLETE") return "审查已过期";
-    if (remotePassed) return "本地审查未确认";
-    return gateLabel(w.gate_status, w.gate_conclusion);
-  }
-
-  function flowReviewEligibleForGate(w) {
-    return w.review?.verdict === "PASS" && w.review?.verification_passed === true && w.review?.skeptic_complete === true &&
-      ["READY", "AWAITING_MAINTAINER"].includes(w.phase);
-  }
-
-  function reviewMilestoneLabel(w, node) {
-    const obsolete = w.review?.verdict === "OBSOLETE";
-    if (node === "verify") {
-      if (!w.review?.verification_passed) return "等待验证";
-      return obsolete ? "历史 · 待重审" : "已通过";
-    }
-    if (node === "skeptic") {
-      if (!w.review?.skeptic_complete) return "待反证";
-      return obsolete ? "历史 · 待重审" : "已完成";
-    }
-    const task = w.review?.tasks?.[node === "reviewer1" ? 0 : 1];
-    if (!task) return "待分配";
-    if (obsolete && task.status === "ACCEPTED") return "历史 · 待重审";
-    return taskLabel(task.status);
-  }
-
-  function flowCurrentLabel(w) {
-    const phase = w.phase;
-    if (w.scheduling?.status === "queued") return "排队等待";
-    if (w.review?.verdict === "OBSOLETE" && ["VERIFYING", "REVIEWING", "READY", "AWAITING_MAINTAINER"].includes(phase)) return "审查待重做";
-    if (phase === "REVIEWING") {
-      const tasks = w.review?.tasks || [];
-      if (tasks.some(task => task.status !== "ACCEPTED")) return "Reviewer 审查";
-      if (!w.review?.skeptic_complete) return "Skeptic 反证";
-      return "等待门禁确认";
-    }
-    return ({ INTAKE: "入队资格", WAITING_CONFIGURATION: "等待授权 / 配置", TRIAGE: "需求确认", NEEDS_INFO: "等待需求补充",
-      SPEC_READY: "批准规格", PLANNING: "开发计划", DEVELOPING: "开发任务", CHANGES_REQUESTED: "修复 / 反证",
-      VERIFYING: "可信验证", READY: "远端门禁", AWAITING_MAINTAINER: "待维护者合并", MERGED: "已合并",
-      BLOCKED: "受阻", DEFERRED: "已暂缓", REJECT_PROPOSED: "维护者覆核", REJECTED: "已拒绝" })[phase] || phaseLabel(phase);
   }
 
   function flowStateNote(w) {
     const control = { PAUSED: "该工作流已暂停。", PAUSING: "该工作流正在暂停。", BLOCKED: "该工作流受阻，未完成步骤保持待执行或受阻状态。", CANCELLING: "该工作流正在取消。", CANCELLED: "该工作流已取消，后续步骤没有被标记为完成。", HUMAN_OWNED: "该工作流由维护者接管。" }[w.control];
     const phase = w.control === "ACTIVE" ? { NEEDS_INFO: "当前等待需求补充；收到回复后可回到需求确认。", DEFERRED: "该请求已暂缓，未批准的后续步骤仍为待执行。", REJECTED: "该请求已被拒绝，后续步骤保持待执行。", REJECT_PROPOSED: "拒绝或延期建议等待维护者覆核。", CHANGES_REQUESTED: "验证或审查要求修改；图中显示修复回路。", BLOCKED: "工作流受阻；图中未完成的步骤不会被标为成功。" }[w.phase] : "";
     const gateCurrent = w.check_sha && w.head_sha && w.check_sha.toLowerCase() === w.head_sha.toLowerCase();
-    const review = w.review?.verdict === "OBSOLETE" ? "当前 Reviewer / Skeptic 结果已过期，显示为历史并待重审。" : "";
+    const review = w.review?.verdict === "OBSOLETE" ? "当前 独立审查 / 质疑复核 结果已过期，显示为历史并待重审。" : "";
     const gate = w.check_sha && !gateCurrent
       ? "当前门禁对应旧提交，当前 head 尚未确认。"
-      : "自动门禁只有在当前 head 的远端 Check Run 成功、当前审查为 PASS、可信验证与 Skeptic 均完成且处于 READY / 待维护者合并时才显示成功。";
+      : "自动门禁只有在当前 head 的远端 Check Run 成功、当前审查为 PASS、可信验证与质疑复核均完成且处于 READY / 待维护者合并时才显示成功。";
     const forced = w.force_approval?.kind === "pr_merge_gate" && w.force_approval_current === true ? "当前版本已由维护者强制放行；人工决定单独记录，验证和审查结果保留。" : "";
     return [control, phase, review, forced, gate].filter(Boolean).join(" ");
   }
@@ -1036,6 +741,73 @@
     return section;
   }
 
+  const authorizationDrafts = new Map();
+  function authorizationPanel(w) {
+    const box = el("div", "authorization-panel");
+    const key = w.review?.key || "";
+    let draft = authorizationDrafts.get(w.id);
+    if (!draft) { draft = { mode: w.phase === "WAITING_RISK" ? "authorize-risk" : "waive", reason: "", expiry: "", finding: "", preview: null }; authorizationDrafts.set(w.id, draft); }
+    if (draft.preview && (draft.preview.generation !== w.generation || draft.preview.head_sha !== w.head_sha || draft.preview.verification_key !== key)) draft.preview = null;
+    box.append(el("p", "", "当前授权身份：local-dashboard（已登录控制台会话，服务按维护者控制台权限记录；不是 GitHub 登录账户）。"));
+    box.append(el("p", "muted", "风险授权仅允许对已审阅的精确候选执行验证，不能扩大路径权限；发现豁免不会伪造测试通过，也不会自动合并。"));
+    if (!key) { box.append(el("p", "muted", "尚未建立冻结验证身份，当前不能提交授权。")); return box; }
+    const form = el("form", "authorization-form stack");
+    const field = (label, node, name) => { const wrap = el("label", "field", label); node.dataset.authField = name; wrap.append(node); form.append(wrap); return node; };
+    const mode = field("授权类型", document.createElement("select"), "mode");
+    mode.add(new Option("高风险实际差异授权", "authorize-risk")); mode.add(new Option("单项发现豁免", "waive")); mode.value = draft.mode;
+    const identity = field("精确验证身份", document.createElement("input"), "key"); identity.value = key; identity.readOnly = true;
+    const finding = field("具体发现（仅豁免使用）", document.createElement("select"), "finding");
+    finding.add(new Option("请选择当前候选的发现", ""));
+    for (const item of w.review?.findings || []) if (item.verification_key === key && !["RESOLVED", "REFUTED"].includes(item.state)) finding.add(new Option(`${item.id} · ${text(item.description)}`, item.id));
+    finding.value = draft.finding;
+    const expiry = field("到期时间（本地时间，必须晚于当前时间）", document.createElement("input"), "expiry"); expiry.type = "datetime-local"; expiry.required = true; expiry.value = draft.expiry;
+    const reason = field("授权理由", document.createElement("textarea"), "reason"); reason.required = true; reason.rows = 3; reason.value = draft.reason;
+    const previewButton = el("button", "button button-secondary", "读取当前实际差异"); previewButton.type = "button";
+    const preview = el("div", "authorization-preview");
+    const message = el("p", "form-message"); message.setAttribute("role", "status");
+    const submit = el("button", "button button-primary", "确认并记录维护者授权"); submit.type = "submit";
+    const renderPreview = () => {
+      preview.replaceChildren();
+      if (draft.preview) preview.append(reportDetails({ changes: draft.preview.changes, risks: draft.preview.risks }, `已读取实际差异 · ${draft.preview.changes.length} 条（展开审阅）`));
+      else preview.append(el("p", "muted", "高风险授权前必须读取实际差异，核对新增、修改、删除路径及内容摘要。"));
+      finding.closest("label").hidden = mode.value !== "waive";
+      previewButton.hidden = mode.value !== "authorize-risk";
+      preview.hidden = mode.value !== "authorize-risk";
+      submit.disabled = Boolean(draft.pending) || (mode.value === "authorize-risk" ? !draft.preview : !finding.value);
+    };
+    mode.addEventListener("change", () => { draft.mode = mode.value; renderPreview(); });
+    finding.addEventListener("change", () => { draft.finding = finding.value; renderPreview(); });
+    expiry.addEventListener("input", () => { draft.expiry = expiry.value; });
+    reason.addEventListener("input", () => { draft.reason = reason.value; });
+    previewButton.addEventListener("click", async () => {
+      previewButton.disabled = true; message.textContent = "正在读取实际差异…";
+      try {
+        const result = await api(`/api/workflows/${encodeURIComponent(w.id)}/risk-preview`);
+        if (result.generation !== w.generation || result.head_sha !== w.head_sha || result.verification_key !== key) throw new Error("候选状态已变化，请刷新后重新审阅。");
+        draft.preview = result; renderPreview(); message.textContent = "实际差异已加载，尚未提交任何授权。";
+      } catch (error) { draft.preview = null; renderPreview(); message.textContent = error.message; }
+      finally { previewButton.disabled = false; }
+    });
+    form.addEventListener("submit", async event => {
+      event.preventDefault(); message.textContent = "";
+      const expires = new Date(expiry.value);
+      if (!Number.isFinite(expires.getTime()) || expires.getTime() <= Date.now() || !reason.value.trim()) { message.textContent = "请填写具体理由及未来到期时间。"; return; }
+      if (mode.value === "waive" && !finding.value) { message.textContent = "请选择具体发现。"; return; }
+      if (mode.value === "authorize-risk" && !draft.preview) { message.textContent = "请先读取并审阅当前实际差异。"; return; }
+      const target = mode.value === "waive" ? `发现 ${finding.value}` : `实际差异 ${draft.preview.changes.map(item => `${item.status} ${item.path}`).join("、")}`;
+      if (!window.confirm(`以 local-dashboard 身份授权：${target}\n验证身份：${key}\n到期：${expires.toLocaleString("zh-CN")}\n理由：${reason.value.trim()}\n确认记录此授权？`)) return;
+      const command = mode.value === "waive"
+        ? `waive ${finding.value} ${key} ${expires.toISOString()} ${reason.value.trim()}`
+        : `authorize-risk ${key} ${expires.toISOString()} ${reason.value.trim()}`;
+      draft.pending = true; submit.disabled = true;
+      try {
+        await api(`/api/workflows/${encodeURIComponent(w.id)}/commands`, { method: "POST", body: JSON.stringify({ command, expected_generation: w.generation, expected_head_sha: w.head_sha || "" }) });
+        authorizationDrafts.delete(w.id); showToast("维护者授权已记录"); await refreshState();
+      } catch (error) { draft.pending = false; message.textContent = `授权未完成：${error.message}`; renderPreview(); }
+    });
+    form.append(previewButton, preview, message, submit); box.append(form); renderPreview(); return box;
+  }
+
   function renderWorkflowDetail(w, tab = "overview") {
     const container = $("#workflow-detail");
     if (!w) {
@@ -1043,9 +815,10 @@
       container.replaceChildren(el("div", "detail-placeholder", "工作流尚未加载或已不存在。"));
       return;
     }
-    const signature = `${w.id}|${tab}|${JSON.stringify(w)}`;
+    const signature = `${w.id}|${tab}|${JSON.stringify(w)}|${JSON.stringify(state.config?.runner)}|${state.promptVersion}`;
     if (container.dataset.renderSignature === signature) return;
     const scrollY = window.scrollY;
+    const activeAuthField = document.activeElement?.dataset?.authField;
     const oldContent = $("#workflow-detail-content", container);
     const contentScrollTop = oldContent?.scrollTop || 0;
     container.dataset.renderSignature = signature;
@@ -1129,13 +902,14 @@
     if (tab === "overview") {
       body.append(proposalApprovalCard(w));
       body.append(renderWorkflowDiagram(w));
+      grid.append(detailSection("智能体运行队列", w.agent_runs?.length || 0, agentQueueContent(w), true));
       const metrics = el("ul", "detail-list");
       detailPair(metrics, "模型调用", w.model_calls);
       detailPair(metrics, "输入 / 输出 Token", `${formatNumber(w.input_tokens)} / ${formatNumber(w.output_tokens)}`);
       detailPair(metrics, "运行时长", `${formatNumber(w.runtime_seconds)} 秒`);
       detailPair(metrics, "修复轮次", w.fix_rounds);
       detailPair(metrics, "PR / 分支", [w.pr ? `#${w.pr}` : "无 PR", w.branch].filter(Boolean).join(" · "));
-      detailPair(metrics, "Base / Head", [w.base_sha, w.head_sha].filter(Boolean).join(" / "));
+      detailPair(metrics, "基线 / 候选提交", [w.base_sha, w.head_sha].filter(Boolean).join(" / "));
       const gateIsForCurrentHead = !w.check_sha || w.check_sha.toLowerCase() === String(w.head_sha || "").toLowerCase();
       detailPair(metrics, "GitHub 门禁", gateIsForCurrentHead ? gateLabel(w.gate_status, w.gate_conclusion) : "旧提交的门禁，当前提交尚未确认");
       detailPair(metrics, "Check Run", [w.check_id ? `#${w.check_id}` : "", w.check_sha || ""].filter(Boolean).join(" · ") || "尚无 Check Run");
@@ -1147,23 +921,36 @@
       grid.append(detailSection(w.spec?.approved ? "已批准规格" : "当前规格（待批准）", w.spec?.criteria?.length || 0, spec));
       if (w.last_error) grid.append(detailSection("最近错误", null, el("div", "error-box", w.last_error), true));
     } else if (tab === "development") {
+      body.append(renderWorkflowDiagram(w));
+      grid.append(detailSection("智能体运行队列",w.agent_runs?.length || 0,agentQueueContent(w),true));
       const tasks = el("div");
       if (Array.isArray(w.tasks) && w.tasks.length) w.tasks.forEach(task => {
         const item = el("div", "item-card");
         item.append(el("strong", "", `${text(task.id, "任务")} · ${taskLabel(task.status)}`));
         item.append(el("p", "", `类型：${({code:"代码",verification:"验证",analysis:"分析"})[task.kind || "code"] || text(task.kind, "代码")} · ${text(task.description, "无任务描述")}`));
         if (task.paths?.length) item.append(el("p", "", `文件：${task.paths.join("、")}`));
-        item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · Commit ${task.integrated_sha}` : ""}`));
+        item.append(el("p", "", `尝试 ${number(task.attempts)} 次${task.integrated_sha ? ` · 提交 ${task.integrated_sha}` : ""}`));
         if (task.report) item.append(el("pre", "inline-report", typeof task.report === "string" ? task.report : JSON.stringify(task.report, null, 2)));
         tasks.append(item);
       }); else tasks.append(el("p", "muted", "暂无开发任务记录。"));
       grid.append(detailSection("开发任务", w.tasks?.length || 0, tasks, true));
     } else if (tab === "review") {
+      body.append(renderWorkflowDiagram(w));
+      grid.append(detailSection("智能体运行队列",w.agent_runs?.length || 0,agentQueueContent(w),true));
       grid.append(detailSection("审查与发现", (w.review?.findings?.length || 0) + (w.review?.tasks?.length || 0), reviewContent(w), true));
     } else if (tab === "evidence") {
       const evidence = el("div");
       renderEvidenceTable(w, evidence);
       grid.append(detailSection("验证证据", Array.isArray(w.evidence) ? w.evidence.length : 0, evidence, true));
+    }
+    if (tab === "overview" || tab === "review") grid.append(detailSection("维护者精确授权",null,authorizationPanel(w),true));
+    if (w.evaluation) { const evaluation = el("div"); evaluation.append(reportDetails(w.evaluation,"冻结评估身份")); evaluation.append(el("p","muted","评估结果不代表人工接受或人工合并。")); grid.append(detailSection("评估协议",null,evaluation,true)); }
+    for (const [key,label] of [["source_artifacts","源码产物"],["evidence_requests","补充证据请求"],["spec_changes","不可变规格提案与决议"],["spec_history","已批准规格历史"],["risk_authorizations","高风险授权记录"],["waivers","发现豁免记录"],["finding_resolutions","发现处置与独立复核"]]) {
+      if (Array.isArray(w[key]) && w[key].length) {
+        const content=el("div");
+        w[key].forEach(item=>content.append(reportDetails(item,`${label} · ${text(item.id,"记录")}`)));
+        grid.append(detailSection(label,w[key].length,content,true));
+      }
     }
     body.append(grid);
     container.append(heading);
@@ -1175,6 +962,7 @@
     window.requestAnimationFrame(() => {
       window.scrollTo({ top: scrollY, behavior: "auto" });
       body.scrollTop = contentScrollTop;
+      if (activeAuthField) container.querySelector(`[data-auth-field="${activeAuthField}"]`)?.focus({ preventScroll: true });
     });
   }
 
@@ -1272,7 +1060,7 @@
     if (form.elements.mode && runner.mode) form.elements.mode.value = runner.mode;
     if (form.elements.require_accept_for_analysis) form.elements.require_accept_for_analysis.checked = Boolean(runner.require_accept_for_analysis);
     if (form.elements.require_accept_for_development) form.elements.require_accept_for_development.checked = Boolean(runner.require_accept_for_development);
-    for (const name of ["workflow_concurrency", "builders", "reviewers", "attempt_minutes"]) {
+    for (const name of ["workflow_concurrency", "attempt_minutes", "agent_concurrency", "workflow_agent_concurrency", "max_tasks_per_workflow", "max_evidence_requests"]) {
       if (form.elements[name] && runner[name] !== undefined) form.elements[name].value = runner[name];
     }
     for (const name of ["issue_calls", "daily_calls", "issue_minutes", "max_attempts", "max_fix_rounds"]) {
@@ -1298,7 +1086,7 @@
       const ready = Boolean(model.base_url && model.dev && model.review);
       message.textContent = ready
         ? (showMessage ? "配置已加载。" : "")
-        : "模型配置尚未完成：请填写 Base URL、开发模型和审查模型后保存。访问 Token 可稍后设置。";
+        : "模型配置尚未完成：请填写服务基础地址、开发模型和审查模型后保存。访问 Token 可稍后设置。";
       message.className = ready ? "form-message success" : "form-message";
     } catch (error) {
       if (error.status !== 401) {
@@ -1343,10 +1131,12 @@
         runner: {
           mode: form.elements.mode.value,
           workflow_concurrency: workflowConcurrency,
+          agent_concurrency: formNumber(form,"agent_concurrency"),
+          workflow_agent_concurrency: formNumber(form,"workflow_agent_concurrency"),
+          max_tasks_per_workflow: formNumber(form,"max_tasks_per_workflow"),
+          max_evidence_requests: formNumber(form,"max_evidence_requests"),
           require_accept_for_analysis: form.elements.require_accept_for_analysis.checked,
           require_accept_for_development: form.elements.require_accept_for_development.checked,
-          builders: formNumber(form, "builders"),
-          reviewers: formNumber(form, "reviewers"),
           attempt_minutes: formNumber(form, "attempt_minutes")
         },
         budget: {
@@ -1423,7 +1213,7 @@
     const installationID = github.installation_id || 0;
     const lines = [
       ["App ID", appID ? String(appID) : "未配置"],
-      ["Installation ID", installationID ? String(installationID) : "未配置"]
+      ["安装 ID", installationID ? String(installationID) : "未配置"]
     ];
     for (const repo of repos) lines.push([text(repo.name, "仓库"), repo.id ? `Repository ID ${repo.id}` : "未绑定"]);
     if (!appID) lines.push(["状态", "尚未配置 GitHub App"]);
@@ -1447,7 +1237,7 @@
       select.replaceChildren(new Option(installations.length ? "请选择安装" : "未发现安装", ""));
       installations.forEach(installation => {
         const account = installation.account?.login || "GitHub 账户";
-        select.add(new Option(`${account} · Installation ${installation.id} · App ${installation.app_id}`, installation.id));
+        select.add(new Option(`${account} · 安装 ${installation.id} · App ${installation.app_id}`, installation.id));
       });
       $("#bind-installation").disabled = installations.length === 0;
       message.textContent = installations.length ? `发现 ${installations.length} 个安装。选择要授权给本服务的安装后再绑定。` : "当前 App 尚无可用安装；请先在 GitHub 安装 App 并选择仓库。";
@@ -1468,7 +1258,7 @@
       const result = await api("/api/github/discover", { method: "POST", body: JSON.stringify({ installation_id: id }) });
       const bound = (result?.repositories || []).filter(repo => repo.bound);
       const unbound = (result?.repositories || []).filter(repo => !repo.bound);
-      message.textContent = `Installation ${result?.installation_id || id} 已绑定。${bound.length} 个配置仓库匹配，${unbound.length} 个尚未授权或 ID 不匹配。`;
+      message.textContent = `安装 ${result?.installation_id || id} 已绑定。${bound.length} 个配置仓库匹配，${unbound.length} 个尚未授权或 ID 不匹配。`;
       await refreshState();
       renderGitHubIdentifiers(state.config);
     } catch (error) {

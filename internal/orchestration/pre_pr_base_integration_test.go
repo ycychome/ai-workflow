@@ -97,12 +97,13 @@ func TestPrePRBaseMoveReplansOnNewBranchPostgresIntegration(t *testing.T) {
 	}
 
 	oldData := publishActionData{Changes: []gh.FileChange{{Path: "calculator.go", Content: []byte("package pilot\nfunc Add(a,b int) int { return a+b }\n"), Mode: "100644"}}, TaskIDs: []string{"old-task"}, Message: "old-base publish", ExpectedParent: w.HeadSHA, BaseBranch: w.BaseBranch, BaseSHA: w.BaseSHA, Branch: w.Branch}
+	attachPublishIntegrationFixture(t, ctx, s, &w, &oldData, "old-candidate-tree")
 	oldAction := store.NewAction(w, "publish", oldData)
 	if err := s.Update(ctx, w.ID, func(*domain.Workflow) ([]store.Action, error) { return []store.Action{oldAction}, nil }); err != nil {
 		t.Fatal(err)
 	}
 	oldAction = setPrePRActionRunning(t, ctx, s, oldAction.ID)
-	if _, err, unknown := e.publishGitHub(ctx, w, oldAction, oldData); err == nil || unknown || !strings.Contains(err.Error(), "base branch moved") {
+	if _, err, unknown := e.publishGitHub(ctx, w, oldAction, oldData); err == nil || unknown || !strings.Contains(err.Error(), "基线分支已移动") {
 		t.Fatalf("stale publish should fail as a known base move: err=%v unknown=%v", err, unknown)
 	}
 	oldBranchSHA := mock.branchSHA(w.Branch)
@@ -163,12 +164,18 @@ func TestPrePRBaseMoveReplansOnNewBranchPostgresIntegration(t *testing.T) {
 	if _, err := s.DB.Exec(ctx, "UPDATE outbox SET state='done',lease_until=NULL WHERE workflow_id=$1 AND kind IN ('gate','comment')", w.ID); err != nil {
 		t.Fatalf("clear unrelated status effects for scheduler fixture: %v", err)
 	}
-	claimed, err := s.Claim(ctx, "pre-pr-base-test")
+	claimed, err := s.Claim(ctx, e.owner)
 	if err != nil || claimed.ID != w.ID {
 		t.Fatalf("claim resumed workflow for model-free plan: id=%s err=%v", claimed.ID, err)
 	}
-	if err := e.plan(ctx, &claimed); err != nil {
-		t.Fatalf("rebuild task plan with fake runner: %v", err)
+	// This publication test supplies an accepted planner delta. Sandbox agent
+	// execution is covered separately; the old fixture deliberately has no runner image.
+	if err := applyDevelopmentPlan(&claimed, developmentPlanReport{ExpectedRevision: claimed.PlanRevision, Reason: "依据新基线重新规划", Tasks: []domain.Task{{ID: "new-base-repair", Kind: "code", Description: "修复新基线的加法", Paths: []string{"calculator.go"}}}}, e.Config().EffectiveMaxTasksPerWorkflow()); err != nil {
+		t.Fatalf("apply new-base planner receipt: %v", err)
+	}
+	claimed.Phase = "DEVELOPING"
+	if err := s.Save(ctx, &claimed); err != nil {
+		t.Fatalf("persist new-base planner receipt: %v", err)
 	}
 	s.Release(ctx, claimed)
 	planned, err := s.Get(ctx, w.ID)
@@ -180,6 +187,7 @@ func TestPrePRBaseMoveReplansOnNewBranchPostgresIntegration(t *testing.T) {
 	}
 
 	newData := publishActionData{Changes: []gh.FileChange{{Path: "calculator.go", Content: []byte("package pilot\nfunc Add(a,b int) int { return a+b }\n"), Mode: "100644"}}, TaskIDs: []string{planned.Tasks[0].ID}, Message: "new-base publish", ExpectedParent: planned.HeadSHA, BaseBranch: planned.BaseBranch, BaseSHA: planned.BaseSHA, Branch: planned.Branch}
+	attachPublishIntegrationFixture(t, ctx, s, &planned, &newData, "new-tree")
 	newAction := store.NewAction(planned, "publish", newData)
 	if err := s.Update(ctx, w.ID, func(*domain.Workflow) ([]store.Action, error) { return []store.Action{newAction}, nil }); err != nil {
 		t.Fatal(err)

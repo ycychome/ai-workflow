@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ycychome/ai-workflow/internal/domain"
 	"github.com/ycychome/ai-workflow/internal/sandbox"
 )
 
@@ -20,7 +19,7 @@ func TestPlannerSessionRetainsManagerAfterConfigurationChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.Sandbox = original
-	w := domain.Workflow{ID: "manager-swap", Repository: "local/pilot", Generation: 1, Control: "ACTIVE"}
+	w := alphaClaimWorkflow(t, e, ctx, "PLANNING", nil)
 	session, cleanup, err := e.plannerSession(ctx, &w, "plan")
 	if err != nil {
 		t.Fatal(err)
@@ -48,11 +47,20 @@ func TestPlannerSessionRetainsManagerAfterConfigurationChange(t *testing.T) {
 	if e.sandboxManager() == original {
 		t.Fatal("configuration did not replace the manager")
 	}
-	if err := session.manager.Cancel(ctx, session.workspace); err != nil {
-		t.Fatalf("existing session lost access to its workspace: %v", err)
+	if _, err := e.sandboxManager().ReadFile(ctx, session.workspace, "calculator.go"); err == nil {
+		t.Fatal("新管理器错误接管旧工作区")
 	}
-	cleanup()
-	if err := original.Cancel(ctx, session.workspace); err == nil {
-		t.Fatal("planner cleanup left its original workspace registered")
+	if _, err := session.manager.ReadFile(ctx, session.workspace, "calculator.go"); err != nil {
+		t.Fatalf("既有会话丢失原管理器工作区：%v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := original.ReadFile(ctx, session.workspace, "calculator.go"); err == nil {
+		t.Fatal("planner 清理后原工作区仍可使用")
+	}
+	// Destroy/Cancel 现为幂等停止确认；重复调用成功表示真实资源仍为空。
+	if err := original.Cancel(ctx, session.workspace); err != nil {
+		t.Fatal(err)
 	}
 }

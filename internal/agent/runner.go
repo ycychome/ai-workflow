@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// MaxToolCallsPerRun bounds ordinary tool invocations independently from
+// model HTTP request attempts. The latter are charged by MaxRequests.
+const MaxToolCallsPerRun = 200
+
 // Tool is an agent-callable function. Parameters must be a JSON Schema object.
 // Handler returns the text placed in the function_call_output item.
 type Tool struct {
@@ -23,13 +27,15 @@ type Tool struct {
 // Request is one bounded agent run. Input is any JSON value accepted by the
 // Responses API input field, commonly a JSON string or an array of input items.
 type Request struct {
+	Role           RoleID
+	PromptVersion  string
 	System         string
 	Input          json.RawMessage
 	Model          string
 	Tools          []Tool
 	ReportSchema   json.RawMessage
-	MaxCalls       int
-	MaxRequests    int
+	MaxCalls       int // ordinary tool invocations permitted in this run
+	MaxRequests    int // charged HTTP attempts permitted in this run, including retries
 	BeforeRequest  func(context.Context) error
 	OnUsage        func(context.Context, Usage) error
 	ValidateReport func(json.RawMessage) error
@@ -106,6 +112,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 		return result, err
 	}
 	requestsMade := 0
+	toolCallsSeen := 0
 	for requestsMade < req.MaxRequests {
 		input, err := json.Marshal(inputItems)
 		if err != nil {
@@ -188,7 +195,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 					return result, fmt.Errorf("agent: submitted report rejected and request limit exhausted: %w", reportErr)
 				}
 				inputItems = append(inputItems, response.Output...)
-				feedback, _ := json.Marshal(map[string]string{"error": "submitted report rejected: " + reportErr.Error()})
+				feedback, _ := json.Marshal(map[string]string{"error": "提交的报告校验未通过，请按以下原因修正并重新提交：" + reportErr.Error()})
 				outputItem, err := json.Marshal(functionOutputItem{Type: "function_call_output", CallID: calls[0].CallID, Output: string(feedback)})
 				if err != nil {
 					return result, fmt.Errorf("agent: encode report validation feedback: %w", err)
@@ -199,16 +206,40 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 			result.Report = append(json.RawMessage(nil), calls[0].Arguments...)
 			return result, nil
 		}
-		if result.Calls+len(calls) > req.MaxCalls {
+		if toolCallsSeen+len(calls) > req.MaxCalls {
 			return result, fmt.Errorf("agent: tool call limit exceeded (%d)", req.MaxCalls)
 		}
+		unknown := make([]functionCallItem, 0)
 		for _, call := range calls {
 			if _, ok := handlers[call.Name]; !ok {
-				return result, fmt.Errorf("agent: model called unknown tool %q", call.Name)
+				unknown = append(unknown, call)
+				continue
 			}
 			if err := validateJSONValue(call.Arguments, toolSchemas[call.Name]); err != nil {
 				return result, fmt.Errorf("agent: arguments for tool %q do not match its schema: %w", call.Name, err)
 			}
+		}
+		toolCallsSeen += len(calls)
+		if len(unknown) > 0 {
+			if requestsMade >= req.MaxRequests {
+				return result, fmt.Errorf("agent: unknown tool %q rejected and request limit exhausted (%d); no correction request remains", unknown[0].Name, req.MaxRequests)
+			}
+			// Reject the complete batch before invoking any handler. Return one
+			// deterministic output per call so the model can correct its request.
+			inputItems = append(inputItems, response.Output...)
+			for _, call := range calls {
+				message := "工具批次包含未注册工具，整批均未执行。请仅使用系统提供的工具名重新提交。"
+				if _, ok := handlers[call.Name]; !ok {
+					message = fmt.Sprintf("未知工具 %q 未执行。请仅使用系统提供的工具名重新提交。", call.Name)
+				}
+				feedback, _ := json.Marshal(map[string]string{"error": message})
+				outputItem, err := json.Marshal(functionOutputItem{Type: "function_call_output", CallID: call.CallID, Output: string(feedback)})
+				if err != nil {
+					return result, fmt.Errorf("agent: encode unknown tool feedback: %w", err)
+				}
+				inputItems = append(inputItems, outputItem)
+			}
+			continue
 		}
 		if requestsMade >= req.MaxRequests {
 			return result, fmt.Errorf("agent: request limit exhausted (%d) before tool execution", req.MaxRequests)
@@ -323,7 +354,7 @@ func prepareTools(tools []Tool, reportSchema json.RawMessage) ([]apiTool, map[st
 		handlers[tool.Name] = tool.Handler
 		schemas[tool.Name] = append(json.RawMessage(nil), tool.Parameters...)
 	}
-	api = append(api, apiTool{Type: "function", Name: "submit_report", Description: "Submit the final structured report for this role.",
+	api = append(api, apiTool{Type: "function", Name: "submit_report", Description: "提交本角色最终结构化报告；本工具独占该次响应，校验失败后可修正并重新提交。",
 		Parameters: append(json.RawMessage(nil), reportSchema...), Strict: false})
 	return api, handlers, schemas, append(json.RawMessage(nil), reportSchema...), nil
 }

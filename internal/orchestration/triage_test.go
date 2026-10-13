@@ -17,7 +17,8 @@ func acceptedTriageReport() triageReport {
 func TestApplyTriageReportApprovalModes(t *testing.T) {
 	for _, requireAccept := range []bool{false, true} {
 		t.Run(map[bool]string{false: "automatic approval", true: "maintainer approval"}[requireAccept], func(t *testing.T) {
-			old := domain.Spec{Title: "old", Digest: "old-digest", Approved: true, ApprovedBy: "maintainer"}
+			old := domain.Spec{Title: "old", Approved: true, ApprovedBy: "maintainer"}
+			old.Digest = domain.SpecDigest(old)
 			w := domain.Workflow{IssueBody: "Fix addition", Phase: "TRIAGE", Spec: old}
 			if err := applyTriageReport(&w, acceptedTriageReport(), requireAccept); err != nil {
 				t.Fatal(err)

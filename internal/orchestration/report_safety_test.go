@@ -15,7 +15,7 @@ func reportSafetyFixture() (domain.Workflow, reviewReport, []domain.Evidence) {
 	ev := domain.Evidence{ID: "original", Kind: "SOURCE_ANALYSIS", HeadSHA: "head", BaseSHA: "base"}
 	f := domain.Finding{Severity: "high", State: "CONFIRMED", EvidenceType: "SOURCE_ANALYSIS", Description: "wrong result", Expected: "correct", Actual: "incorrect", Preconditions: "boundary input", Path: "a.go", Line: 1, Evidence: []string{ev.ID}}
 	f.ID = "F-" + domain.Digest([]any{f.Path, f.Line, f.Description})[:10]
-	w := domain.Workflow{Control: "ACTIVE", HeadSHA: "head", BaseSHA: "base", Spec: domain.Spec{Approved: true, Criteria: []domain.Criterion{{ID: "AC1"}}}, Evidence: []domain.Evidence{ev}, Review: domain.Review{Key: "key", VerificationPassed: true, SkepticComplete: true, Obligations: []domain.Obligation{{ID: "O1", CriterionID: "AC1", Result: "satisfied", Evidence: []string{ev.ID}}}, Findings: []domain.Finding{f}}}
+	w := domain.Workflow{Control: "ACTIVE", HeadSHA: "head", BaseSHA: "base", Spec: domain.Spec{Approved: true, Criteria: []domain.Criterion{{ID: "AC1"}}}, Evidence: []domain.Evidence{ev}, Review: domain.Review{Key: "key", Tasks: []domain.Task{{ID: "review", Status: "ACCEPTED", ObligationIDs: []string{"O1"}}}, VerificationPassed: true, SkepticComplete: true, Obligations: []domain.Obligation{{ID: "O1", CriterionID: "AC1", Result: "satisfied", Evidence: []string{ev.ID}}}, Findings: []domain.Finding{f}}}
 	return w, reviewReport{Obligations: append([]domain.Obligation(nil), w.Review.Obligations...), Findings: []domain.Finding{f}}, []domain.Evidence{ev}
 }
 func TestMergeReportRejectsInvalidEnums(t *testing.T) {

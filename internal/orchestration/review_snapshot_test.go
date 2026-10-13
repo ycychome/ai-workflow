@@ -12,12 +12,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/ycychome/ai-workflow/internal/config"
 	"github.com/ycychome/ai-workflow/internal/domain"
 	gh "github.com/ycychome/ai-workflow/internal/github"
 	"github.com/ycychome/ai-workflow/internal/sandbox"
@@ -25,6 +21,8 @@ import (
 )
 
 func TestReviewAndDiffUseVerifiedMergeSnapshot(t *testing.T) {
+	// Remote snapshot access also checks the persistent repository epoch fence.
+	e, _ := safetyRegressionDB(t)
 	var archive bytes.Buffer
 	var headArchive bytes.Buffer
 	zw := zip.NewWriter(&archive)
@@ -78,26 +76,11 @@ func TestReviewAndDiffUseVerifiedMergeSnapshot(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cfg := config.Config{}
-	cfg.Runner.Image = "review-snapshot-test-unavailable"
-	e, err := New(nil, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.app, err = gh.New(gh.Config{AppID: "1", PrivateKeyPEM: pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), BaseURL: server.URL, HTTPClient: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stop review after source selection, before any database, model or Docker operation.
-	fake := filepath.Join(t.TempDir(), "docker-disabled")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	e.Sandbox, err = sandbox.NewManager(sandbox.Options{DockerBinary: fake})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,8 +94,9 @@ func TestReviewAndDiffUseVerifiedMergeSnapshot(t *testing.T) {
 	}
 	w.Review.Key = e.key(context.Background(), w)
 	w.Review.VerificationPassed = true
-	if err := e.review(context.Background(), &w); err == nil || !strings.Contains(err.Error(), "create bounded workspace volume") {
-		t.Fatalf("review did not reach sandbox using verified source: %v", err)
+	reviewFiles, err := e.reviewSnapshot(context.Background(), w)
+	if err != nil || string(reviewFiles["config"].Data) != "secure base setting" {
+		t.Fatalf("review source is not the verified merge snapshot: %v", err)
 	}
 	base := map[string]sandbox.File{"config": {Data: []byte("secure base setting"), Mode: 0644}, "handler": {Data: []byte("old handler"), Mode: 0644}}
 	diff, err := e.candidateDiff(context.Background(), w, base, w.TestedSHA)

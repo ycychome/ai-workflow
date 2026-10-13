@@ -31,6 +31,8 @@ func (s *Store) QueueLabelRepair(ctx context.Context) error {
  jsonb_build_object('phase',w.phase,'control',w.control,'pr',COALESCE((w.data->>'pr')::integer,0))
  FROM workflows w
  WHERE w.data->>'repository'<>'local/pilot'
+ AND NOT EXISTS(SELECT 1 FROM retired_workflow_ids r WHERE r.workflow_id=w.id)
+ AND NOT EXISTS(SELECT 1 FROM repository_maintenance m WHERE m.repository_id=w.repository_id AND (m.held OR m.intake_stopped))
  AND COALESCE((w.data->>'installation_id')::bigint,0)>0 AND w.issue>0
  AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.workflow_id=w.id AND o.kind='labels' AND o.state IN('pending','retry_wait','unknown','running'))
  ON CONFLICT DO NOTHING`)
@@ -38,17 +40,5 @@ func (s *Store) QueueLabelRepair(ctx context.Context) error {
 }
 
 func (s *Store) ClaimLabelAction(ctx context.Context) (Action, error) {
-	var a Action
-	err := s.DB.QueryRow(ctx, `WITH next AS (
- SELECT o.id FROM outbox o WHERE o.kind='labels'
- AND o.state IN('pending','retry_wait','unknown','running')
- AND o.next_attempt<=now() AND (o.lease_until IS NULL OR o.lease_until<now())
- AND NOT EXISTS(SELECT 1 FROM outbox earlier WHERE earlier.workflow_id=o.workflow_id AND earlier.kind='labels'
- AND (earlier.created_at<o.created_at OR (earlier.created_at=o.created_at AND earlier.id<o.id))
- AND earlier.state IN('pending','retry_wait','unknown','running'))
- ORDER BY o.created_at,o.id FOR UPDATE SKIP LOCKED LIMIT 1
- ) UPDATE outbox SET state='running',lease_until=now()+interval '90 seconds',attempts=attempts+1
- FROM next WHERE outbox.id=next.id
- RETURNING outbox.id,workflow_id,generation,kind,data,attempts`).Scan(&a.ID, &a.WorkflowID, &a.Generation, &a.Kind, &a.Data, &a.Attempts)
-	return a, err
+	return s.claimRepositoryAction(ctx, true)
 }

@@ -3,6 +3,7 @@ package orchestration
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,6 +30,7 @@ func TestPublishRetryRequiresExactCommitChanges(t *testing.T) {
 			}
 			w = mustGetPrePRWorkflow(t, ctx, e.Store, w.ID)
 			d := publishActionData{Changes: []gh.FileChange{{Path: "calculator.go", Content: []byte("fixed"), Mode: "100644"}}, TaskIDs: []string{"task"}, Message: "Implement task", ExpectedParent: w.HeadSHA, BaseBranch: w.BaseBranch, BaseSHA: w.BaseSHA, Branch: w.Branch}
+			attachPublishIntegrationFixture(t, ctx, e.Store, &w, &d, "tree-published-head")
 			a := store.NewAction(w, "publish", d)
 			base := map[string]sandbox.File{"calculator.go": {Data: []byte("old"), Mode: 0644}, "untouched": {Data: []byte("preserve"), Mode: 0644}}
 			head := map[string]sandbox.File{"calculator.go": {Data: []byte("fixed"), Mode: 0644}, "untouched": {Data: []byte("preserve"), Mode: 0644}}
@@ -310,4 +312,20 @@ func TestResumeDoesNotUndoTakeoverAfterPrechecks(t *testing.T) {
 	if got.Control != "HUMAN_OWNED" {
 		t.Fatalf("resume undid takeover: %+v", got)
 	}
+}
+
+// attachPublishIntegrationFixture models the validated controller integration
+// receipt that must exist before an outbox publication can be authorized.
+func attachPublishIntegrationFixture(t *testing.T, ctx context.Context, s *store.Store, w *domain.Workflow, d *publishActionData, tree string) {
+	t.Helper()
+	d.IntegrationID = "integration-" + domain.Digest([]any{w.ID, w.Generation, d.ExpectedParent, tree})
+	d.ExpectedTree = tree
+	record := domain.IntegrationRecord{ID: d.IntegrationID, ParentSHA: d.ExpectedParent, TreeSHA: tree, Generation: w.Generation, SpecDigest: w.Spec.Digest, Status: "VALIDATED", CreatedAt: time.Now().UTC()}
+	if err := s.Update(ctx, w.ID, func(x *domain.Workflow) ([]store.Action, error) {
+		x.IntegrationRecords = append(x.IntegrationRecords, record)
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	*w = mustGetPrePRWorkflow(t, ctx, s, w.ID)
 }

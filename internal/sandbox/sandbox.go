@@ -27,6 +27,7 @@ import (
 const (
 	managedLabel          = "ai-workflow.managed"
 	workspaceLabel        = "ai-workflow.workspace"
+	runLabel              = "ai-workflow.run"
 	managedValue          = "1"
 	workerUID             = "10001:10001"
 	defaultImage          = "ai-workflow-runner:local"
@@ -39,8 +40,8 @@ const (
 	maxArchiveBytes       = 256 << 20
 )
 
-// File is a regular file in a source snapshot. Mode is normalized to 0644 or
-// 0755; special files and symlinks are deliberately not representable.
+// File is a regular file in a source snapshot. Mode is normalized to Git's
+// 100644 or 100755 semantics; special files and symlinks are not representable.
 type File struct {
 	Data []byte
 	Mode fs.FileMode
@@ -52,6 +53,7 @@ type File struct {
 // workers run with Docker's isolated "none" network.
 type Options struct {
 	DockerBinary   string
+	PostgresImage  string
 	RunnerImage    string
 	CPUQuota       float64
 	MemoryBytes    int64
@@ -63,6 +65,7 @@ type Options struct {
 type Manager struct {
 	docker          string
 	image           string
+	postgresImage   string
 	cpus            float64
 	memory          int64
 	pids            int
@@ -76,20 +79,31 @@ type Manager struct {
 // Workspace is an opaque handle. Its volume is private to its Manager and is
 // never a host path. A workspace is single-run-at-a-time.
 type Workspace struct {
-	ID string
+	ID             string
+	readOnly       bool
+	reviewScratch  *Workspace
+	judgePeer      *Workspace
+	judgeOwner     *Workspace
+	judgeTransport *Workspace
+	sharedServices bool
 
-	manager         *Manager
-	volume          string
-	keeper          string
-	keeperID        string
-	keeperStartedAt string
-	filesystemID    string
-	lifecycleMu     sync.RWMutex
-	invalid         string
-	mu              sync.Mutex
-	runMu           sync.Mutex
-	running         string
-	baseline        map[string]snapshotMeta
+	manager           *Manager
+	volume            string
+	keeper            string
+	keeperID          string
+	keeperStartedAt   string
+	filesystemID      string
+	lifecycleMu       sync.RWMutex
+	invalid           string
+	mu                sync.Mutex
+	runMu             sync.Mutex
+	running           string
+	baseline          map[string]snapshotMeta
+	socketVolume      string
+	postgresContainer string
+	postgresID        string
+	postgresStartedAt string
+	databaseURL       string
 }
 
 // RunResult contains bounded stdout/stderr captured after the container exits.
@@ -130,6 +144,9 @@ func NewManager(options Options) (*Manager, error) {
 	if options.DockerBinary == "" {
 		options.DockerBinary = "docker"
 	}
+	if options.PostgresImage == "" {
+		options.PostgresImage = "postgres:16-bookworm"
+	}
 	if options.RunnerImage == "" {
 		options.RunnerImage = defaultImage
 	}
@@ -154,6 +171,7 @@ func NewManager(options Options) (*Manager, error) {
 	return &Manager{
 		docker:          options.DockerBinary,
 		image:           options.RunnerImage,
+		postgresImage:   options.PostgresImage,
 		cpus:            options.CPUQuota,
 		memory:          options.MemoryBytes,
 		pids:            options.PidsLimit,
@@ -201,10 +219,7 @@ func (m *Manager) Create(ctx context.Context, id string, files map[string]File) 
 	w.baseline = make(map[string]snapshotMeta, len(files))
 	for name, file := range files {
 		clean, _ := cleanRelativePath(name)
-		mode := fs.FileMode(0644)
-		if file.Mode&0111 != 0 {
-			mode = 0755
-		}
+		mode, _ := NormalizeGitFileMode(file.Mode) // snapshotTar validated this mode.
 		w.baseline[clean] = snapshotMeta{hash: sha256.Sum256(file.Data), mode: mode}
 	}
 	m.mu.Lock()
@@ -213,47 +228,15 @@ func (m *Manager) Create(ctx context.Context, id string, files map[string]File) 
 	return w, nil
 }
 
-// Recover removes resources left by this supervisor after an unclean exit.
-// This is intended for the single-control-instance MVP: it only selects
-// containers and volumes carrying the supervisor's explicit labels.
+// Recover refuses unscoped cleanup: another controller may own live resources.
+// Use RecoverWorkspace with an expired, fenced AgentRun ID instead.
 func (m *Manager) Recover(ctx context.Context) error {
-	if m == nil {
-		return errors.New("nil sandbox manager")
-	}
-	containers, err := m.dockerOutput(ctx, "ps", "-aq", "--filter", "label="+managedLabel+"="+managedValue)
-	if err != nil {
-		return fmt.Errorf("list managed worker containers: %w", err)
-	}
-	var recoveryErrors []error
-	for _, id := range strings.Fields(string(containers)) {
-		if _, err := m.dockerOutput(ctx, "rm", "-f", id); err != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("remove managed container %s: %w", id, err))
-		}
-	}
-
-	volumes, err := m.dockerOutput(ctx, "volume", "ls", "-q", "--filter", "label="+managedLabel+"="+managedValue)
-	if err != nil {
-		return errors.Join(append(recoveryErrors, fmt.Errorf("list managed workspace volumes: %w", err))...)
-	}
-	for _, volume := range strings.Fields(string(volumes)) {
-		mounted, err := m.dockerOutput(ctx, "ps", "-aq", "--filter", "volume="+volume)
-		if err != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("check workspace volume %s attachments: %w", volume, err))
-			continue
-		}
-		if len(strings.Fields(string(mounted))) != 0 {
-			continue
-		}
-		if _, err := m.dockerOutput(ctx, "volume", "rm", volume); err != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("remove managed workspace volume %s: %w", volume, err))
-		}
-	}
-	return errors.Join(recoveryErrors...)
+	return errors.New("unscoped recovery is disabled; use RecoverWorkspace with a fenced run ID")
 }
 
 // Run executes one argument-vector command with no shell interpolation. A
 // timeout or caller cancellation stops and removes the worker container.
-func (m *Manager) Run(ctx context.Context, w *Workspace, args []string, timeout time.Duration) (RunResult, error) {
+func (m *Manager) Run(ctx context.Context, w *Workspace, args []string, timeout time.Duration) (result RunResult, runErr error) {
 	finish, err := m.beginWorkspaceOperation(ctx, w)
 	if err != nil {
 		return RunResult{}, err
@@ -279,7 +262,14 @@ func (m *Manager) Run(ctx context.Context, w *Workspace, args []string, timeout 
 	if err != nil {
 		return RunResult{}, err
 	}
-	argsDocker := m.workerArgs(name, w.volume)
+	if err := m.checkPostgres(ctx, w); err != nil {
+		return RunResult{}, err
+	}
+	argsDocker := sealWorkerMounts(m.workerArgs(name, w.volume), w)
+	argsDocker = append(argsDocker, "--label", runLabel+"="+runHash(w.ID))
+	if w.socketVolume != "" {
+		argsDocker = append(argsDocker, "--mount", "type=volume,src="+w.socketVolume+",dst=/run/aiwf-postgres,readonly,volume-nocopy", "--env", "DATABASE_URL="+w.databaseURL, "--env", "TEST_DATABASE_URL="+w.databaseURL, "--env", "AGENT_QUEUE_TEST_DATABASE_URL="+w.databaseURL)
+	}
 	argsDocker = append(argsDocker, "--entrypoint", "/bin/sh", m.image)
 	command := append([]string{"timeout", "--signal=TERM", "--kill-after=2", timeoutSeconds(timeout)}, args...)
 	argsDocker = append(argsDocker, workspaceCommand(w, command)[1:]...)
@@ -292,17 +282,19 @@ func (m *Manager) Run(ctx context.Context, w *Workspace, args []string, timeout 
 		w.mu.Unlock()
 		cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = m.dockerOutput(cleanCtx, "rm", "-f", name)
+		if err := m.removeContainerConfirmed(cleanCtx, name); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
 	}()
 
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if _, err := m.dockerOutput(runCtx, argsDocker...); err != nil {
 		if ctx.Err() != nil {
-			return RunResult{}, ctx.Err()
+			return m.collectInterruptedRun(name, ctx.Err(), false)
 		}
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return RunResult{ExitCode: 124, TimedOut: true}, nil
+			return m.collectInterruptedRun(name, nil, true)
 		}
 		return RunResult{}, fmt.Errorf("start worker: %w", err)
 	}
@@ -310,21 +302,22 @@ func (m *Manager) Run(ctx context.Context, w *Workspace, args []string, timeout 
 	// container. In that race Cancel cannot yet find it, so stop here and let
 	// the deferred forced removal reap it instead of waiting for its command.
 	if err := m.checkKeeper(runCtx, w); err != nil {
+		if ctx.Err() != nil {
+			return m.collectInterruptedRun(name, ctx.Err(), false)
+		}
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return m.collectInterruptedRun(name, nil, true)
+		}
 		return RunResult{}, err
 	}
 	waitOut, waitErr := m.dockerOutput(runCtx, "wait", name)
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	if waitErr != nil {
 		if runCtx.Err() != nil {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, _ = m.dockerOutput(stopCtx, "stop", "--time", "1", name)
-			stopCancel()
 			if ctx.Err() != nil {
-				return RunResult{TimedOut: false}, ctx.Err()
+				return m.collectInterruptedRun(name, ctx.Err(), false)
 			}
-			if !timedOut {
-				return RunResult{}, runCtx.Err()
-			}
+			return m.collectInterruptedRun(name, runCtx.Err(), timedOut)
 		} else {
 			return RunResult{}, fmt.Errorf("wait for worker: %w", waitErr)
 		}
@@ -344,8 +337,11 @@ func (m *Manager) Run(ctx context.Context, w *Workspace, args []string, timeout 
 			return RunResult{}, err
 		}
 	}
-	result := RunResult{ExitCode: code, Stdout: string(logsOut), Stderr: string(logsStderr), TimedOut: timedOut}
+	result = RunResult{ExitCode: code, Stdout: string(logsOut), Stderr: string(logsStderr), TimedOut: timedOut}
 	if err := m.checkKeeper(ctx, w); err != nil {
+		return result, err
+	}
+	if err := m.checkPostgres(ctx, w); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -403,6 +399,9 @@ func (m *Manager) WriteFile(ctx context.Context, w *Workspace, filePath string, 
 	}
 	if hasGitComponent(clean) {
 		return errors.New("Git metadata is not part of the source workspace")
+	}
+	if w.readOnly && (w.reviewScratch == nil || !strings.HasPrefix(clean, "review_tests/")) {
+		return errors.New("candidate is sealed read-only")
 	}
 	if len(file.Data) > maxFileBytes {
 		return errors.New("workspace file exceeds the 64 MiB write limit")
@@ -546,11 +545,8 @@ func (m *Manager) CollectChanges(ctx context.Context, w *Workspace) ([]Change, e
 		if h.Typeflag == tar.TypeDir {
 			continue
 		}
-		if h.Typeflag == tar.TypeSymlink || h.Typeflag == tar.TypeLink {
-			return nil, fmt.Errorf("cannot export non-regular changed path %q", p)
-		}
 		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
-			continue
+			return nil, fmt.Errorf("cannot export non-regular changed path %q", p)
 		}
 		clean, err := cleanRelativePath(p)
 		if err != nil {
@@ -563,13 +559,17 @@ func (m *Manager) CollectChanges(ctx context.Context, w *Workspace) ([]Change, e
 		if err != nil {
 			return nil, err
 		}
-		current[clean] = Change{Path: clean, Mode: fs.FileMode(h.Mode), Data: data}
+		mode, err := NormalizeGitFileMode(fs.FileMode(h.Mode))
+		if err != nil {
+			return nil, fmt.Errorf("cannot export changed path %q with unsupported mode: %w", clean, err)
+		}
+		current[clean] = Change{Path: clean, Mode: mode, Data: data}
 	}
 	changes := make([]Change, 0)
 	for name, base := range w.baseline {
 		if now, ok := current[name]; !ok {
 			changes = append(changes, Change{Path: name, Status: "D", Deleted: true})
-		} else if base.hash != sha256.Sum256(now.Data) || base.mode.Perm() != now.Mode.Perm() {
+		} else if base.hash != sha256.Sum256(now.Data) || base.mode != now.Mode {
 			now.Status = "M"
 			changes = append(changes, now)
 		}
@@ -584,25 +584,18 @@ func (m *Manager) CollectChanges(ctx context.Context, w *Workspace) ([]Change, e
 	return changes, nil
 }
 
-// Cancel stops the active worker for this workspace, if any.
+// Cancel revokes and destroys the entire attempt, including its database.
 func (m *Manager) Cancel(ctx context.Context, w *Workspace) error {
-	if err := m.checkWorkspace(w); err != nil {
-		return err
-	}
-	w.mu.Lock()
-	name := w.running
-	w.mu.Unlock()
-	if name == "" {
-		return nil
-	}
-	_, err := m.dockerOutput(ctx, "stop", "--time", "1", name)
-	return err
+	return m.Destroy(ctx, w)
 }
 
 // Destroy stops any active worker and removes the named volume.
 func (m *Manager) Destroy(ctx context.Context, w *Workspace) error {
+	if m == nil || w == nil || w.manager != m {
+		return errors.New("workspace does not belong to this manager")
+	}
 	if err := m.checkWorkspace(w); err != nil {
-		return err
+		return m.confirmRunAbsent(ctx, "label="+workspaceLabel+"="+workspaceHashForVolume(w.volume))
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -626,6 +619,9 @@ func (m *Manager) Destroy(ctx context.Context, w *Workspace) error {
 	if err := errors.Join(initialCleanupErr, m.removeWorkspaceStorage(ctx, w)); err != nil {
 		return err
 	}
+	if err := m.confirmRunAbsent(ctx, "label="+workspaceLabel+"="+workspaceHashForVolume(w.volume)); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	delete(m.workspaces, w)
 	m.mu.Unlock()
@@ -644,6 +640,10 @@ func (m *Manager) initialize(ctx context.Context, w *Workspace, archive []byte) 
 }
 
 func (m *Manager) initializeFiles(ctx context.Context, w *Workspace, archive []byte) error {
+	if w.readOnly {
+		_, err := m.helperAs(ctx, w, bytes.NewReader(archive), workerUID, "/bin/tar", "--no-same-owner", "-xf", "-", "-C", "/workspace")
+		return err
+	}
 	script := "set -eu; mkdir -p /workspace; tar -xf - -C /workspace; chown -R 10001:10001 /workspace"
 	if _, err := m.helperAs(ctx, w, bytes.NewReader(archive), "0:0", "/bin/sh", "-ceu", script); err != nil {
 		return fmt.Errorf("write workspace snapshot: %w", err)
@@ -663,7 +663,7 @@ func (m *Manager) workerArgs(name, volume string) []string {
 		"--mount", "type=volume,src=" + volume + ",dst=/workspace,volume-nocopy"}
 	args = append(args, "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m,mode=1777",
 		"--env", "HOME=/tmp", "--env", "GIT_CONFIG_NOSYSTEM=1", "--env", "GIT_CONFIG_GLOBAL=/dev/null",
-		"--env", "GIT_TERMINAL_PROMPT=0", "--env", "GOTOOLCHAIN=local")
+		"--env", "GIT_TERMINAL_PROMPT=0", "--env", "GOTOOLCHAIN=local", "--env", "GOPROXY=off", "--env", "GOSUMDB=off")
 	return args
 }
 
@@ -672,18 +672,20 @@ func (m *Manager) helperAs(ctx context.Context, w *Workspace, input io.Reader, u
 		return nil, err
 	}
 	command = workspaceCommand(w, command)
-	args := []string{"run", "--rm"}
+	args := []string{"run", "--rm", "--log-driver", "none"}
 	if input != nil {
 		args = append(args, "-i")
 	}
 	args = append(args, "--label", managedLabel+"="+managedValue,
 		"--label", workspaceLabel+"="+workspaceHashForVolume(w.volume),
-		"--network", "none", "--user", user, "--mount", "type=volume,src="+w.volume+",dst=/workspace,volume-nocopy",
+		"--label", runLabel+"="+runHash(w.ID),
+		"--network", "none", "--user", user,
 		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
 		"--pids-limit", fmt.Sprint(m.pids), "--cpus", fmt.Sprintf("%.3f", m.cpus),
 		"--memory", fmt.Sprint(m.memory), "--memory-swap", fmt.Sprint(m.memory),
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
 		"--env", "HOME=/tmp", "--env", "GIT_CONFIG_NOSYSTEM=1", "--env", "GIT_CONFIG_GLOBAL=/dev/null")
+	args = append(args, workspaceMountArgs(w, w.readOnly, false)...)
 	if user == "0:0" {
 		args = append(args, "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER")
 	}
@@ -717,13 +719,15 @@ func (m *Manager) archiveOutput(ctx context.Context, w *Workspace, command ...st
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"run", "--rm", "--label", managedLabel + "=" + managedValue,
+	args := []string{"run", "--rm", "--log-driver", "none", "--label", managedLabel + "=" + managedValue,
 		"--label", workspaceLabel + "=" + workspaceHashForVolume(w.volume),
+		"--label", runLabel + "=" + runHash(w.ID),
 		"--network", "none", "--user", workerUID,
 		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
 		"--pids-limit", "64", "--memory", "256m", "--name", name,
-		"--mount", "type=volume,src=" + w.volume + ",dst=/workspace,readonly,volume-nocopy", "--workdir", "/workspace",
-		"--entrypoint", command[0], m.image}
+		"--workdir", "/workspace"}
+	args = append(args, workspaceMountArgs(w, true, true)...)
+	args = append(args, "--entrypoint", command[0], m.image)
 	args = append(args, command[1:]...)
 	out, err := m.dockerArchiveOutput(ctx, maxArchiveBytes, args...)
 	if err != nil {
@@ -850,6 +854,12 @@ func snapshotTar(files map[string]File) ([]byte, error) {
 			_ = tw.Close()
 			return nil, fmt.Errorf("snapshot cannot contain Git metadata: %q", name)
 		}
+		mode, err := NormalizeGitFileMode(file.Mode)
+		if err != nil {
+			_ = tw.Close()
+			return nil, fmt.Errorf("snapshot file %q has unsupported mode: %w", name, err)
+		}
+		file.Mode = mode
 		cleanFiles[clean] = file
 		for parent := path.Dir(clean); parent != "."; parent = path.Dir(parent) {
 			dirs[parent] = struct{}{}
@@ -879,11 +889,7 @@ func snapshotTar(files map[string]File) ([]byte, error) {
 	sort.Strings(fileNames)
 	for _, clean := range fileNames {
 		file := cleanFiles[clean]
-		mode := int64(0644)
-		if file.Mode&0111 != 0 {
-			mode = 0755
-		}
-		header := &tar.Header{Name: clean, Mode: mode, Size: int64(len(file.Data)), Typeflag: tar.TypeReg, Format: tar.FormatPAX}
+		header := &tar.Header{Name: clean, Mode: int64(file.Mode), Size: int64(len(file.Data)), Typeflag: tar.TypeReg, Format: tar.FormatPAX}
 		if err := tw.WriteHeader(header); err != nil {
 			_ = tw.Close()
 			return nil, err

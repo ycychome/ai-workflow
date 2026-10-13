@@ -309,7 +309,7 @@ func (i *InstallationClient) GetArchive(ctx context.Context, owner, repo, ref st
 // PublishBranch commits the supplied file changes with expectedParent as the sole parent,
 // verifies the remote branch still points at that parent, then advances it without force.
 // It never checks out, executes, or runs hooks on repository contents.
-func (i *InstallationClient) PublishBranch(ctx context.Context, owner, repo, branch, expectedParent, message string, changes []FileChange) (PublishResult, error) {
+func (i *InstallationClient) PublishBranch(ctx context.Context, owner, repo, branch, expectedParent, message string, changes []FileChange, expectedTrees ...string) (PublishResult, error) {
 	var result PublishResult
 	if owner == "" || repo == "" || branch == "" || expectedParent == "" || message == "" {
 		return result, errors.New("github: owner, repo, branch, expected parent and commit message are required")
@@ -368,6 +368,9 @@ func (i *InstallationClient) PublishBranch(ctx context.Context, owner, repo, bra
 	}
 	if tree.SHA == "" {
 		return result, errors.New("github: tree creation returned empty SHA")
+	}
+	if len(expectedTrees) > 0 && (len(expectedTrees) != 1 || expectedTrees[0] == "" || tree.SHA != expectedTrees[0]) {
+		return result, errors.New("github: generated tree differs from independently integrated candidate")
 	}
 	var commit gitCommitResponse
 	if e := i.request(ctx, http.MethodPost, "/repos/"+q(owner)+"/"+q(repo)+"/git/commits", map[string]any{"message": message, "tree": tree.SHA, "parents": []string{expectedParent}}, &commit); e != nil {

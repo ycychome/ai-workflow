@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: issuedesk
+      POSTGRES_USER: issuedesk
+      POSTGRES_PASSWORD: synthetic-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U issuedesk -d issuedesk"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - issuedesk-data:/var/lib/postgresql/data
+  app:
+    build:
+      context: ../..
+      dockerfile: fixtures/issuedesk/Dockerfile
+    environment:
+      ISSUEDESK_DATABASE_URL: postgres://issuedesk:synthetic-local-only@db:5432/issuedesk?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+volumes:
+  issuedesk-data:

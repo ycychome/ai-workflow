@@ -1,0 +1,52 @@
+# Standalone project: never combine with the legacy root compose.yaml.
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    env_file: ["${ALPHA_STATE_DIR:?set absolute ALPHA_STATE_DIR}/secrets/postgres.env"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    networks: [control]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  control:
+    image: ${ALPHA_CONTROL_IMAGE:-ai-workflow-control:alpha}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: ["${ALPHA_STATE_DIR}/secrets/control.env"]
+    environment:
+      CONFIG_FILE: /secrets/config.yaml
+      DATA_DIR: /data
+      HTTP_ADDR: 0.0.0.0:8080
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:${ALPHA_HTTP_PORT:-18080}:8080"
+      - "127.0.0.1:${ALPHA_SETUP_PORT:-18081}:8081"
+    volumes:
+      - "${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock"
+      - "${ALPHA_STATE_DIR}/secrets:/secrets:rw"
+      - "control-data:/data"
+    networks: [control]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:8080/readyz']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+  runner-image:
+    image: ${ALPHA_RUNNER_IMAGE:-ai-workflow-runner:alpha}
+    build:
+      context: ..
+      dockerfile: deploy/runner.Dockerfile
+    profiles: [images]
+volumes:
+  postgres-data:
+  control-data:
+networks:
+  control:
+    driver: bridge

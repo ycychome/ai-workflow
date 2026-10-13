@@ -19,4 +19,49 @@ jobs:
           cache: true
       - run: go test ./...
       - run: go vet ./...
-      - run: test -z "$(gofmt -l cmd internal)"
+      - run: test -z "$(gofmt -l cmd internal fixtures)"
+      - name: Python evaluation and recovery contracts
+        run: |
+          python3 -m unittest discover -s eval -p 'test_*.py'
+          python3 -m unittest discover -s cmd/evaluate -p 'test_*.py'
+          python3 scripts/pilot-reset_test.py
+          python3 scripts/pilot-github-admin_test.py
+          python3 scripts/pilot-eval-github_test.py
+          python3 scripts/test_alpha_acceptance.py
+  acceptance:
+    name: control/isolated-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.24.0'
+          cache: true
+      - name: Prepare offline toolchain and disposable databases
+        run: |
+          docker pull postgres:17
+          docker pull postgres:16-bookworm
+          docker build -t ai-workflow-runner:local -f deploy/runner.Dockerfile .
+      - name: Unit, PostgreSQL, Docker and T01-T28
+        run: scripts/alpha-postgres-check.sh /tmp/alpha-acceptance-ci all
+      - name: Report acceptance results
+        if: always()
+        run: |
+          if [ -f /tmp/alpha-acceptance-ci/summary.json ]; then
+            cat /tmp/alpha-acceptance-ci/summary.json
+          fi
+          if [ -d /tmp/alpha-acceptance-ci ]; then
+            find /tmp/alpha-acceptance-ci -name '*.jsonl' -exec sha256sum {} \;
+          fi
+      - name: Preserve isolated acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        continue-on-error: true
+        with:
+          name: isolated-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/alpha-acceptance-ci/
+          if-no-files-found: warn
+          retention-days: 7

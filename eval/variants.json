@@ -1,0 +1,97 @@
+{
+  "T01": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "(created_at,id)<($9::timestamptz,$8)",
+        "after": "created_at<$9::timestamptz"
+      }
+    ]
+  },
+  "T02": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/model.go",
+        "before": "return allowed[from][to]",
+        "after": "return allowed[from][to] || role == \"admin\" && from == \"closed\" && to == \"open\""
+      }
+    ]
+  },
+  "T03": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "\tif in.Comment != nil {\n\t\tif _, err = tx.Exec(ctx, `INSERT INTO comments",
+        "after": "\tif in.Comment != nil {\n\t\tif err = tx.Commit(ctx); err != nil { return Ticket{}, err }\n\t\ttx, err = s.Pool.Begin(ctx)\n\t\tif err != nil { return Ticket{}, err }\n\t\tdefer tx.Rollback(ctx)\n\t\tif _, err = tx.Exec(ctx, `INSERT INTO comments"
+      }
+    ]
+  },
+  "T04": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "FROM tickets WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, a.TenantID, id))",
+        "after": "FROM tickets WHERE $1::bigint>0 AND id=$2 AND deleted_at IS NULL`, a.TenantID, id))"
+      }
+    ]
+  },
+  "T05": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "if current.Version != version {",
+        "after": "if false && current.Version != version {"
+      },
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "AND version=$7 AND deleted_at IS NULL RETURNING",
+        "after": "AND version>=$7 AND deleted_at IS NULL RETURNING"
+      }
+    ]
+  },
+  "T06": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "if savedHash != requestHash {",
+        "after": "if false && savedHash != requestHash {"
+      }
+    ]
+  },
+  "T07": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/store.go",
+        "before": "return strings.NewReplacer(`\\`, `\\\\`, `%`, `\\%`, `_`, `\\_`).Replace(s)",
+        "after": "return s"
+      }
+    ]
+  },
+  "T08": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/migrate.go",
+        "before": "\t\t\tcontinue\n\t\t}\n\t\tif err != pgx.ErrNoRows {",
+        "after": "\t\t\t_, err = tx.Exec(ctx, string(body))\n\t\t\tif err != nil { return err }\n\t\t\tcontinue\n\t\t}\n\t\tif err != pgx.ErrNoRows {"
+      }
+    ]
+  },
+  "T09": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/app.go",
+        "before": "map[string]APIError{\"error\": {p.code, p.message}}",
+        "after": "map[string]APIError{\"failure\": {p.code, p.message}}"
+      }
+    ]
+  },
+  "T10": {
+    "edits": [
+      {
+        "path": "fixtures/issuedesk/app.go",
+        "before": "map[string]any{\"Title\": title}",
+        "after": "map[string]any{\"Title\": template.HTML(title)}"
+      }
+    ]
+  }
+}

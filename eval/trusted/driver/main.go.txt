@@ -1,0 +1,63 @@
+// 此驱动只提供候选服务接口；不包含测试、期望结果或判定协议。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ycychome/ai-workflow/fixtures/issuedesk"
+)
+
+func main() {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		log.Fatal("候选数据库连接失败")
+	}
+	defer pool.Close()
+	if err = issuedesk.Migrate(ctx, pool); err != nil {
+		log.Fatal(err)
+	}
+	if err = issuedesk.Seed(ctx, pool); err != nil {
+		log.Fatal(err)
+	}
+	socket := os.Getenv("AI_WORKFLOW_JUDGE_SOCKET")
+	if socket == "" {
+		log.Fatal("候选服务缺少私有 socket")
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer listener.Close()
+	if err = os.Chmod(socket, 0666); err != nil {
+		log.Fatal(err)
+	}
+	app := issuedesk.NewApp(pool)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__judge/migrate" {
+			if r.Method != "POST" {
+				http.Error(w, "仅允许迁移请求", http.StatusMethodNotAllowed)
+				return
+			}
+			err := issuedesk.Migrate(r.Context(), pool)
+			w.Header().Set("Content-Type", "application/json")
+			if err != nil {
+				w.WriteHeader(500)
+				json.NewEncoder(w).Encode(map[string]any{"ok": false})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		app.ServeHTTP(w, r)
+	})
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 1 << 20}
+	log.Fatal(server.Serve(listener))
+}

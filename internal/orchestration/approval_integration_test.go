@@ -71,7 +71,7 @@ func TestApprovalWorkflowPostgresIntegration(t *testing.T) {
 	if err := s.Create(ctx, defaultW); err != nil {
 		t.Fatalf("create default triage workflow: %v", err)
 	}
-	claimed, err := s.Claim(ctx, "approval-default")
+	claimed, err := s.Claim(ctx, defaultEngine.owner)
 	if err != nil || claimed.ID != defaultW.ID {
 		t.Fatalf("claim default triage fixture: id=%s err=%v", claimed.ID, err)
 	}
@@ -106,7 +106,7 @@ func TestApprovalWorkflowPostgresIntegration(t *testing.T) {
 	if err := s.Create(ctx, manualW); err != nil {
 		t.Fatalf("create manual-gate workflow: %v", err)
 	}
-	claimed, err = s.Claim(ctx, "approval-manual")
+	claimed, err = s.Claim(ctx, manualEngine.owner)
 	if err != nil || claimed.ID != manualW.ID {
 		t.Fatalf("claim manual-gate fixture: id=%s err=%v", claimed.ID, err)
 	}

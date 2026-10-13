@@ -108,7 +108,10 @@ END $$;
 	if e != nil {
 		return e
 	}
-	return s.migrateIssueSourceIdentity(ctx)
+	if e = s.migrateIssueSourceIdentity(ctx); e != nil {
+		return e
+	}
+	return s.MigrateAgentQueue(ctx)
 }
 func (s *Store) Inbox(ctx context.Context, id, event string, payload []byte) error {
 	if id == "" || !json.Valid(payload) {
@@ -180,6 +183,19 @@ func (s *Store) CreateIfAbsent(ctx context.Context, w domain.Workflow) (bool, er
 		return false, e
 	}
 	defer tx.Rollback(ctx)
+	if e = lockRepositoryEpoch(ctx, tx, w.RepositoryID); e != nil {
+		return false, e
+	}
+	if e = checkRepositoryIntakeEpoch(ctx, tx, w.RepositoryID, w.RepositoryEpoch); e != nil {
+		return false, e
+	}
+	var retired bool
+	if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM retired_workflow_ids WHERE workflow_id=$1)`, w.ID).Scan(&retired); e != nil {
+		return false, e
+	}
+	if retired {
+		return false, ErrStale
+	}
 	tag, e := tx.Exec(ctx, `INSERT INTO workflows(id,repository_id,issue,phase,control,generation,version,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, w.ID, w.RepositoryID, w.Issue, w.Phase, w.Control, w.Generation, w.Version, b)
 	if e != nil {
 		return false, e
@@ -302,16 +318,27 @@ WHERE lease_owner<>'' AND lease_until>now() AND control='ACTIVE'
 	err = tx.QueryRow(ctx, `SELECT w.id,w.repository_id
 FROM workflows w
 WHERE w.control='ACTIVE'
+ AND NOT EXISTS(SELECT 1 FROM repository_maintenance m WHERE m.repository_id=w.repository_id AND (m.held OR m.intake_stopped))
+ AND NOT EXISTS(SELECT 1 FROM retired_workflow_ids r WHERE r.workflow_id=w.id)
   AND w.phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')
   AND (w.lease_until IS NULL OR w.lease_until<now())
   AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.workflow_id=w.id AND o.kind IN('publish','gate','ready') AND o.state IN('pending','running','unknown','retry_wait'))
 ORDER BY w.updated_at
-FOR UPDATE OF w SKIP LOCKED
 LIMIT 1`).Scan(&id, &repositoryID)
 	if err != nil {
 		return domain.Workflow{}, err
 	}
 
+	repositoryLocked, err := tryLockRepositoryEpoch(ctx, tx, repositoryID)
+	if err != nil {
+		return domain.Workflow{}, err
+	}
+	if !repositoryLocked {
+		return domain.Workflow{}, pgx.ErrNoRows
+	}
+	if err = checkRepositoryDispatch(ctx, tx, repositoryID); err != nil {
+		return domain.Workflow{}, err
+	}
 	tag, err := tx.Exec(ctx, `UPDATE workflows SET lease_owner=$2,lease_until=now()+interval '90 seconds'
 WHERE id=$1 AND repository_id=$3 AND control='ACTIVE'
   AND phase IN('TRIAGE','PLANNING','DEVELOPING','VERIFYING','REVIEWING','CHANGES_REQUESTED')
@@ -327,6 +354,7 @@ WHERE id=$1 AND repository_id=$3 AND control='ACTIVE'
 	}
 	return s.Get(ctx, id)
 }
+
 func (s *Store) Renew(ctx context.Context, w domain.Workflow) error {
 	tag, e := s.DB.Exec(ctx, "UPDATE workflows SET lease_until=now()+interval '90 seconds' WHERE id=$1 AND lease_owner=$2 AND generation=$3 AND control='ACTIVE' AND lease_until>now()", w.ID, w.LeaseOwner, w.Generation)
 	if e != nil {
@@ -353,6 +381,9 @@ func insertActions(ctx context.Context, tx pgx.Tx, actions []Action) error {
 // Save fences every execution field while preserving discussion appended since
 // the worker snapshot. Comments cannot replace task state or invalidate a lease.
 func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action) error {
+	if run, ok := AgentFenceFromContext(ctx); ok && (run.WorkflowID != w.ID || run.Generation != w.Generation) {
+		return ErrStale
+	}
 	old := w.Version
 	w.Version++
 	w.UpdatedAt = time.Now().UTC()
@@ -376,6 +407,10 @@ func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action)
 		w.Version = old
 		return e
 	}
+	if e = checkAgentFence(ctx, tx); e != nil {
+		w.Version = old
+		return e
+	}
 	if w.Review.Key != "" && (w.Review.Verdict == "PASS" || w.Review.Verdict == "CHANGES_REQUESTED" || w.Review.Verdict == "BLOCKED") {
 		d := domain.GateDecision{ID: domain.Digest([]any{w.ID, w.Generation, w.Version, w.Review.Key, w.Review.Verdict}), WorkflowID: w.ID, Generation: w.Generation, VerificationKey: w.Review.Key, SpecDigest: w.Spec.Digest, BaseSHA: w.BaseSHA, HeadSHA: w.HeadSHA, Verdict: w.Review.Verdict, Reason: w.Review.Reason, Evidence: w.Evidence, Coverage: w.Review.Obligations, Findings: w.Review.Findings, CreatedAt: time.Now().UTC()}
 		payload, _ := json.Marshal(d)
@@ -395,6 +430,10 @@ func (s *Store) Save(ctx context.Context, w *domain.Workflow, actions ...Action)
 	if e = insertActions(ctx, tx, actions); e != nil {
 		return e
 	}
+	if e = checkAgentFence(ctx, tx); e != nil {
+		w.Version = old
+		return e
+	}
 	return tx.Commit(ctx)
 }
 
@@ -407,6 +446,9 @@ func (s *Store) Update(ctx context.Context, id string, fn func(*domain.Workflow)
 	defer tx.Rollback(ctx)
 	w, err := scan(tx.QueryRow(ctx, workflowSelect+" WHERE w.id=$1 FOR UPDATE OF w", id))
 	if err != nil {
+		return err
+	}
+	if err = checkWorkflowNotRetired(ctx, tx, id); err != nil {
 		return err
 	}
 	if expected, ok := ctx.Value(expectedStateContextKey{}).(expectedWorkflowState); ok && (w.Generation != expected.Generation || w.HeadSHA != expected.HeadSHA) {
@@ -575,13 +617,19 @@ func (s *Store) ReserveRequest(ctx context.Context, id string, generation int64,
 	if gen != generation || mode != "ACTIVE" {
 		return ErrStale
 	}
+	if run, ok := AgentFenceFromContext(ctx); ok && run.WorkflowID != id {
+		return ErrStale
+	}
+	if e = checkAgentFence(ctx, tx); e != nil {
+		return e
+	}
 	var n int
 	e = tx.QueryRow(ctx, "SELECT calls FROM workflow_metrics WHERE workflow_id=$1 FOR UPDATE", id).Scan(&n)
 	if e != nil {
 		return e
 	}
 	if n >= issueLimit {
-		return errors.New("issue model request budget exhausted")
+		return ErrIssueBudget
 	}
 	day := time.Now().In(time.FixedZone("Asia/Shanghai", 8*3600)).Format("2006-01-02")
 	_, e = tx.Exec(ctx, "INSERT INTO daily_usage(day) VALUES($1) ON CONFLICT DO NOTHING", day)
@@ -594,7 +642,7 @@ func (s *Store) ReserveRequest(ctx context.Context, id string, generation int64,
 		return e
 	}
 	if daily >= dailyLimit {
-		return errors.New("daily model request budget exhausted")
+		return ErrDailyBudget
 	}
 	_, e = tx.Exec(ctx, "UPDATE daily_usage SET calls=calls+1 WHERE day=$1", day)
 	if e != nil {
@@ -604,6 +652,11 @@ func (s *Store) ReserveRequest(ctx context.Context, id string, generation int64,
 	if e != nil {
 		return e
 	}
+	// Metrics and daily quota locks can outlive the remaining session lease.
+	// Recheck the current clock before committing either charge.
+	if e = checkAgentFence(ctx, tx); e != nil {
+		return e
+	}
 	return tx.Commit(ctx)
 }
 func (s *Store) Usage(ctx context.Context, id string, in, out int64) error {
@@ -611,9 +664,9 @@ func (s *Store) Usage(ctx context.Context, id string, in, out int64) error {
 	return e
 }
 func (s *Store) Runtime(ctx context.Context, id string, seconds int64) error {
-	_, e := s.DB.Exec(ctx, "UPDATE workflow_metrics SET runtime_seconds=runtime_seconds+$2 WHERE workflow_id=$1", id, seconds)
-	return e
+	return s.ChargeControllerRuntime(ctx, id, seconds)
 }
+
 func (s *Store) Attempt(ctx context.Context, id, wid, intent string, gen, epoch int64, state string, report, evidence any) error {
 	return s.AttemptOwned(ctx, id, wid, intent, gen, epoch, "", state, report, evidence)
 }
@@ -630,6 +683,29 @@ func (s *Store) AttemptOwned(ctx context.Context, id, wid, intent string, gen, e
 	if err != nil {
 		return err
 	}
+
+	if fence, ok := AgentFenceFromContext(ctx); ok && (fence.WorkflowID != wid || fence.Generation != gen) {
+		return ErrStale
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var live bool
+	err = tx.QueryRow(ctx, `SELECT generation=$2 AND control='ACTIVE' AND lease_owner<>'' AND lease_until>clock_timestamp() AND ($3='' OR lease_owner=$3) FROM workflows WHERE id=$1 FOR SHARE`, wid, gen, owner).Scan(&live)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrStale
+	}
+	if err != nil {
+		return err
+	}
+	if !live {
+		return ErrStale
+	}
+	if err = checkAgentFence(ctx, tx); err != nil {
+		return err
+	}
 	var ownerClause string
 	args := []any{id, wid, intent, gen, epoch, state, r, ev}
 	if owner != "" {
@@ -640,21 +716,24 @@ func (s *Store) AttemptOwned(ctx context.Context, id, wid, intent string, gen, e
 SELECT $1,$2,$3,$4,$5,$6,$7,$8
 WHERE EXISTS (
   SELECT 1 FROM workflows WHERE id=$2 AND generation=$4 AND control='ACTIVE'
-    AND lease_owner<>'' AND lease_until>now()` + ownerClause + `
+    AND lease_owner<>'' AND lease_until>clock_timestamp()` + ownerClause + `
 ) AND NOT EXISTS (
   SELECT 1 FROM attempts WHERE workflow_id=$2 AND intent_id=$3 AND generation=$4 AND lease_epoch>$5
 )
 ON CONFLICT(id) DO UPDATE SET state=EXCLUDED.state,report=EXCLUDED.report,
 evidence=EXCLUDED.evidence,updated_at=now()
 WHERE attempts.generation=EXCLUDED.generation AND attempts.lease_epoch<=EXCLUDED.lease_epoch`
-	tag, err := s.DB.Exec(ctx, query, args...)
+	tag, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrStale
 	}
-	return nil
+	if err = checkAgentFence(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) Audit(ctx context.Context, id, kind string, data any) {
@@ -692,23 +771,7 @@ WHERE workflow_id=$1 ORDER BY id DESC LIMIT 500`, workflowID)
 }
 
 func (s *Store) ClaimAction(ctx context.Context) (Action, error) {
-	var a Action
-	err := s.DB.QueryRow(ctx, `WITH next AS (
-  SELECT o.id FROM outbox o
-  WHERE o.kind<>'labels' AND o.state IN ('pending','retry_wait','unknown','running')
-    AND o.next_attempt<=now() AND (o.lease_until IS NULL OR o.lease_until<now())
-    AND NOT EXISTS (
-      SELECT 1 FROM outbox earlier
-      WHERE earlier.workflow_id=o.workflow_id AND earlier.kind<>'labels'
-        AND (earlier.created_at<o.created_at OR (earlier.created_at=o.created_at AND earlier.id<o.id))
-        AND earlier.state IN ('pending','retry_wait','unknown','running')
-    )
-  ORDER BY o.created_at,o.id FOR UPDATE SKIP LOCKED LIMIT 1
-)
-UPDATE outbox SET state='running',lease_until=now()+interval '90 seconds',attempts=attempts+1
-FROM next WHERE outbox.id=next.id
-RETURNING outbox.id,workflow_id,generation,kind,data,attempts`).Scan(&a.ID, &a.WorkflowID, &a.Generation, &a.Kind, &a.Data, &a.Attempts)
-	return a, err
+	return s.claimRepositoryAction(ctx, false)
 }
 
 func actionIsPassingGate(data []byte) bool {
@@ -741,6 +804,9 @@ func (s *Store) StartAction(ctx context.Context, a Action) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockWorkflowDispatch(ctx, tx, a.WorkflowID); err != nil {
+		return err
+	}
 	var generation int64
 	var control, phase string
 	err = tx.QueryRow(ctx, "SELECT generation,control,phase FROM workflows WHERE id=$1 FOR UPDATE", a.WorkflowID).Scan(&generation, &control, &phase)

@@ -16,6 +16,10 @@ import (
 type toolSession struct {
 	e                *Engine
 	w                domain.Workflow
+	ctx              context.Context
+	execution        *agentExecution
+	preflight        *domain.Preflight
+	inspections      map[string]string
 	workspace        *sandbox.Workspace
 	manager          *sandbox.Manager
 	snapshotSHA      string
@@ -28,38 +32,100 @@ type toolSession struct {
 	readableEvidence []domain.Evidence
 }
 
-func (e *Engine) plannerSession(ctx context.Context, w *domain.Workflow, role string) (*toolSession, func(), error) {
-	if w.BaseSHA == "" && w.Repository != "local/pilot" {
-		c, o, r, err := e.client(ctx, *w)
-		if err != nil {
-			return nil, nil, err
-		}
-		sha, err := c.GetBranchSHA(ctx, o, r, w.BaseBranch)
-		if err != nil {
-			return nil, nil, err
-		}
-		w.BaseSHA = sha
+func (e *Engine) plannerSession(ctx context.Context, w *domain.Workflow, role string) (*toolSession, func() error, error) {
+	roleID := agent.RoleDevPlanner
+	switch role {
+	case "triage":
+		roleID = agent.RoleTriage
+	case "review-plan":
+		roleID = agent.RoleReviewPlanner
 	}
-	sha := w.HeadSHA
-	if sha == "" {
-		sha = w.BaseSHA
-	}
-	files, err := e.source(ctx, *w, sha)
+	task := domain.Task{ID: role, Attempts: 1, Paths: []string{}, DependsOn: []string{}}
+	execution, err := e.beginAgent(ctx, *w, task, roleID)
 	if err != nil {
 		return nil, nil, err
 	}
-	m := e.sandboxManager()
-	workspace, err := m.Create(ctx, fmt.Sprintf("%s-g%d-%s", w.ID, w.Generation, role), files)
+	*w = execution.w
+	ctx = execution.ctx
+	var files map[string]sandbox.File
+	if roleID == agent.RoleReviewPlanner {
+		files, err = e.reviewSnapshot(ctx, *w)
+	} else {
+		sha := w.HeadSHA
+		if sha == "" {
+			sha = w.BaseSHA
+		}
+		files, err = e.source(ctx, *w, sha)
+	}
 	if err != nil {
+		_ = execution.finish()
 		return nil, nil, err
 	}
-	session := &toolSession{e: e, w: *w, workspace: workspace, manager: m, review: true}
-	return session, func() { m.Destroy(context.Background(), workspace) }, nil
+	workspace, err := execution.manager.Create(ctx, execution.run.ID, files)
+	if err != nil {
+		_ = execution.finish()
+		return nil, nil, err
+	}
+	if err = execution.manager.SealReadOnly(ctx, workspace, false); err != nil {
+		_ = execution.finish()
+		return nil, nil, err
+	}
+	session := &toolSession{e: e, w: *w, workspace: workspace, manager: execution.manager, review: true, ctx: ctx, execution: execution}
+	if roleID == agent.RoleReviewPlanner {
+		session.snapshotSHA = w.TestedSHA
+		session.snapshotTreeSHA = w.TestedTreeSHA
+		session.baseFiles, err = e.baseSnapshot(ctx, *w)
+	}
+	if err != nil {
+		_ = execution.finish()
+		return nil, nil, err
+	}
+	return session, func() error {
+		if err := execution.finish(); err != nil {
+			e.Store.Audit(context.Background(), w.ID, "agent_stop_pending", map[string]any{"agent_run_id": execution.run.ID, "error": err.Error()})
+			return err
+		}
+		return nil
+	}, nil
+}
+func (t *toolSession) ask(input string, tools []agent.Tool, schema json.RawMessage, validators ...func(json.RawMessage) error) (json.RawMessage, error) {
+	validators = append([]func(json.RawMessage) error{t.validatePreflight}, validators...)
+	return t.e.ask(t.ctx, t.w, t.execution.role, input, tools, schema, validators...)
+}
+func (t *toolSession) validatePreflight(_ json.RawMessage) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.preflight == nil {
+		return errors.New("尚未提交启动检查；先读取 workflow_state 和当前项目，再调用 submit_preflight")
+	}
+	return nil
+}
+func (t *toolSession) fakePreflight(ctx context.Context) error {
+	ids := []string{}
+	for _, name := range []string{"workflow_state", "list_files"} {
+		args := raw(map[string]any{})
+		if name == "list_files" {
+			args = raw(map[string]string{"path": "."})
+		}
+		result, err := t.handler(ctx, name, args)
+		if err != nil {
+			return err
+		}
+		var value struct {
+			EvidenceID string `json:"evidence_id"`
+		}
+		if err := json.Unmarshal([]byte(result), &value); err != nil {
+			return err
+		}
+		ids = append(ids, value.EvidenceID)
+	}
+	_, err := t.handler(ctx, "submit_preflight", raw(map[string]any{"evidence_ids": ids}))
+	return err
 }
 func (t *toolSession) readTools() []agent.Tool {
 	var out []agent.Tool
 	for _, tool := range t.tools() {
-		if tool.Name == "workflow_state" || tool.Name == "read_file" || tool.Name == "list_files" || tool.Name == "search" || tool.Name == "read_base_file" || tool.Name == "candidate_diff" {
+		if tool.Name == "submit_preflight" || tool.Name == "workflow_state" || tool.Name == "read_file" || tool.Name == "list_files" || tool.Name == "search" || tool.Name == "read_base_file" || tool.Name == "candidate_diff" {
 			out = append(out, tool)
 		}
 	}
@@ -69,7 +135,7 @@ func (t *toolSession) readTools() []agent.Tool {
 func (t *toolSession) verificationTools() []agent.Tool {
 	var out []agent.Tool
 	for _, tool := range t.tools() {
-		if tool.Name == "workflow_state" || tool.Name == "read_file" || tool.Name == "list_files" || tool.Name == "search" || tool.Name == "run" || tool.Name == "read_base_file" || tool.Name == "candidate_diff" {
+		if tool.Name == "submit_preflight" || tool.Name == "workflow_state" || tool.Name == "read_file" || tool.Name == "list_files" || tool.Name == "search" || tool.Name == "run" || tool.Name == "read_base_file" || tool.Name == "candidate_diff" {
 			out = append(out, tool)
 		}
 	}
@@ -82,6 +148,9 @@ func (t *toolSession) record(ctx context.Context, kind string, data any, command
 	id := fmt.Sprintf("%s:%s:%d", t.workspace.ID, kind, len(t.evidence)+1)
 	ev, err := t.e.artifact(ctx, t.w, id, kind, data)
 	if err == nil {
+		if t.execution != nil {
+			ev.AgentRunID = t.execution.run.ID
+		}
 		ev.Command = command
 		ev.ExitCode = code
 		ev.TestedCommitSHA = t.snapshotSHA
@@ -97,30 +166,81 @@ func (t *toolSession) listEvidence() []domain.Evidence {
 }
 func (t *toolSession) handler(ctx context.Context, name string, args json.RawMessage) (output string, retErr error) {
 	defer func() {
+		if retErr == nil && (name == "workflow_state" || name == "read_file" || name == "read_base_file" || name == "list_files" || name == "search" || name == "candidate_diff") {
+			var value struct {
+				EvidenceID string `json:"evidence_id"`
+			}
+			if json.Unmarshal([]byte(output), &value) == nil && value.EvidenceID != "" {
+				t.mu.Lock()
+				if t.inspections == nil {
+					t.inspections = map[string]string{}
+				}
+				t.inspections[value.EvidenceID] = name
+				t.mu.Unlock()
+			}
+		}
 		if retErr != nil {
 			t.e.Store.Audit(context.WithoutCancel(ctx), t.w.ID, "tool_error", map[string]any{"generation": t.w.Generation, "tool": name, "arguments": t.e.redact(string(args)), "error": t.e.redact(retErr.Error())})
 		}
 	}()
+	if t.execution != nil {
+		if err := t.execution.check(ctx); err != nil {
+			return "", err
+		}
+	}
 	current, err := t.e.Store.Get(ctx, t.w.ID)
 	if err != nil {
 		return "", err
 	}
 	if current.Generation != t.w.Generation || current.Control != "ACTIVE" {
-		return "", errors.New("run authorization revoked")
+		return "", errors.New("本次运行授权已撤销")
 	}
 	var p struct {
-		Path       string   `json:"path"`
-		Content    string   `json:"content"`
-		Query      string   `json:"query"`
-		Args       []string `json:"args"`
-		Timeout    int      `json:"timeout_seconds"`
-		EvidenceID string   `json:"evidence_id"`
+		Path        string   `json:"path"`
+		Content     string   `json:"content"`
+		Query       string   `json:"query"`
+		Args        []string `json:"args"`
+		Timeout     int      `json:"timeout_seconds"`
+		EvidenceID  string   `json:"evidence_id"`
+		EvidenceIDs []string `json:"evidence_ids"`
 	}
 	if err = json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
+	if (name == "write_file" || name == "run") && t.execution != nil {
+		if err := t.validatePreflight(nil); err != nil {
+			return "", err
+		}
+	}
 	m := t.manager
 	switch name {
+	case "submit_preflight":
+		if t.execution == nil {
+			return "", errors.New("缺少有效的 Agent 运行身份")
+		}
+		t.mu.Lock()
+		state, source := false, false
+		for _, id := range p.EvidenceIDs {
+			kind, ok := t.inspections[id]
+			if !ok {
+				t.mu.Unlock()
+				return "", errors.New("启动检查引用了本次运行未读取的证据")
+			}
+			if kind == "workflow_state" {
+				state = true
+			} else {
+				source = true
+			}
+		}
+		if !state || !source {
+			t.mu.Unlock()
+			return "", errors.New("启动检查必须同时引用当前 workflow_state 与项目检查证据")
+		}
+		preflight := domain.Preflight{AgentRunID: t.execution.run.ID, ContextHash: t.execution.run.ContextHash, Evidence: append([]string{}, p.EvidenceIDs...), CheckedAt: time.Now().UTC()}
+		t.preflight = &preflight
+		t.mu.Unlock()
+		t.e.Store.Audit(ctx, t.w.ID, "agent_preflight", preflight)
+		return encodeToolOutput(preflight, nil)
 	case "read_evidence":
 		for _, ev := range t.readableEvidence {
 			if ev.ID == p.EvidenceID {
@@ -133,7 +253,7 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 				preview := t.e.redact(string(content))
 				body := map[string]any{"recorded_evidence_id": ev.ID, "recorded_hash": ev.Hash, "kind": ev.Kind, "exit_code": ev.ExitCode, "content": preview, "content_format": "json_text", "truncated": strings.HasSuffix(preview, "\n[truncated]")}
 				if body["truncated"] == true {
-					body["notice"] = "Evidence preview was truncated; inspect candidate source or run a focused command before relying on omitted content."
+					body["notice"] = "证据预览已截断；依赖未展示内容前，请检查候选源码或执行针对性命令。"
 				}
 				// Reading a proof is not a new observation. Keep its original ID and
 				// trust metadata; a fresh SOURCE_ANALYSIS alias could launder a
@@ -147,7 +267,7 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 				return output, nil
 			}
 		}
-		return "", errors.New("evidence ID is not in the assigned proof set")
+		return "", errors.New("证据 ID 不在已分配的证据集合中")
 	case "workflow_state":
 		// This projection comes from the control store, not model-written reports.
 		// The publisher has no merge operation; human_merge_required is supervisor policy.
@@ -155,13 +275,23 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 		for _, task := range current.Tasks {
 			tasks = append(tasks, map[string]any{"id": task.ID, "kind": taskKind(task), "status": task.Status, "integrated_sha": task.IntegratedSHA})
 		}
-		facts := map[string]any{"workflow_id": current.ID, "generation": current.Generation, "phase": current.Phase, "control": current.Control, "spec_approved": current.Spec.Approved, "dev_tasks": tasks, "pull_request": current.PR, "head_sha": current.HeadSHA, "human_merge_required": true, "runner_mode": t.e.Config().Runner.Mode}
+		runs, err := t.e.Store.ListAgentRuns(ctx, current.ID)
+		if err != nil {
+			return "", err
+		}
+		active := []map[string]any{}
+		for _, run := range runs {
+			if run.Generation == current.Generation && (run.Status == domain.AgentQueued || run.Status == domain.AgentActive || run.Status == domain.AgentStopping) {
+				active = append(active, map[string]any{"task_id": run.TaskID, "role": run.Role, "status": run.Status, "run_id": run.ID})
+			}
+		}
+		facts := map[string]any{"active_and_queued_agents": active, "plan_revision": current.PlanRevision, "review_plan_revision": current.Review.PlanRevision, "spec_digest": current.Spec.Digest, "verification_key": current.Review.Key, "workflow_id": current.ID, "generation": current.Generation, "phase": current.Phase, "control": current.Control, "spec_approved": current.Spec.Approved, "dev_tasks": tasks, "pull_request": current.PR, "head_sha": current.HeadSHA, "human_merge_required": true, "runner_mode": t.e.Config().Runner.Mode}
 		ev, err := t.record(ctx, "SOURCE_ANALYSIS", facts, nil, 0)
 		return encodeToolOutput(map[string]any{"facts": facts, "evidence_id": ev.ID}, err)
 	case "read_base_file":
 		f, ok := t.baseFiles[p.Path]
 		if !ok {
-			return "", errors.New("path is absent from base snapshot")
+			return "", errors.New("该路径不在固定基线快照中")
 		}
 		ev, err := t.record(ctx, "SOURCE_ANALYSIS", map[string]any{"base_sha": t.w.BaseSHA, "path": p.Path, "content": t.e.redact(string(f.Data))}, nil, 0)
 		return encodeToolOutput(map[string]any{"content": t.e.redact(string(f.Data)), "evidence_id": ev.ID}, err)
@@ -181,7 +311,11 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 		return encodeToolOutput(map[string]any{"content": t.e.redact(string(b)), "evidence_id": ev.ID}, err)
 	case "list_files":
 		entries, err := m.List(ctx, t.workspace, p.Path)
-		return encodeToolOutput(entries, err)
+		if err != nil {
+			return "", err
+		}
+		ev, err := t.record(ctx, "SOURCE_ANALYSIS", entries, nil, 0)
+		return encodeToolOutput(map[string]any{"entries": entries, "evidence_id": ev.ID}, err)
 	case "search":
 		matches, err := m.Search(ctx, t.workspace, p.Query)
 		if err != nil {
@@ -192,16 +326,16 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 	case "write_file":
 		if t.review {
 			if !safePath(p.Path) || !strings.HasPrefix(p.Path, "review_tests/") {
-				return "", errors.New("review may only write supplemental files under review_tests/")
+				return "", errors.New("审查只能在 review_tests/ 下写入补充文件")
 			}
 		} else if !allowedPath(p.Path, t.e.repository(t.w), t.scope) {
-			return "", errors.New("path is outside assigned task or protected by policy")
+			return "", errors.New("路径超出任务范围或受策略保护")
 		}
 		if len(p.Content) > 1<<20 {
-			return "", errors.New("file exceeds tool limit")
+			return "", errors.New("文件超过工具大小限制")
 		}
 		err := m.WriteFile(ctx, t.workspace, p.Path, sandbox.File{Data: []byte(p.Content), Mode: 0644})
-		return "file written", err
+		return "文件已写入", err
 	case "run":
 		timeout := time.Duration(p.Timeout) * time.Second
 		if timeout <= 0 || timeout > 5*time.Minute {
@@ -220,23 +354,29 @@ func (t *toolSession) handler(ctx context.Context, name string, args json.RawMes
 		}
 		return encodeToolOutput(map[string]any{"exit_code": code, "stdout": result.Stdout, "stderr": result.Stderr, "timed_out": result.TimedOut, "evidence_id": ev.ID, "error": errString(err)}, nil)
 	}
-	return "", errors.New("unknown tool")
+	return "", errors.New("未知工具")
 }
 func (t *toolSession) tools() []agent.Tool {
 	props := func(p map[string]any) json.RawMessage { return raw(object(p)) }
 	tools := []agent.Tool{
-		{Name: "workflow_state", Description: "Read independently recorded control state, Dev artifact/task completion, and human merge policy. Provides evidence for workflow process constraints, not source correctness", Parameters: props(map[string]any{}), Handler: t.handler},
-		{Name: "read_file", Description: "Read a source file and obtain immutable evidence ID", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
-		{Name: "list_files", Description: "List workspace files; path can be .", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
-		{Name: "search", Description: "Search source text and obtain evidence ID", Parameters: props(map[string]any{"query": str()}), Handler: t.handler},
-		{Name: "write_file", Description: "Write assigned source; reviewers only supplemental tests under review_tests/", Parameters: props(map[string]any{"path": str(), "content": str()}), Handler: t.handler},
-		{Name: "run", Description: "Run an argument vector in an isolated, credential-free, network-disabled container. Use sh -lc for shell commands. Obtain trusted exit/log evidence", Parameters: props(map[string]any{"args": array(str()), "timeout_seconds": map[string]any{"type": "integer"}}), Handler: t.handler},
+		{Name: "submit_preflight", Parameters: props(map[string]any{"evidence_ids": array(str())}), Handler: t.handler},
+		{Name: "workflow_state", Description: "读取控制器独立记录的控制状态、开发产物与任务完成状态、人工合并策略。这些证据用于验证工作流过程约束，不能证明源码正确。", Parameters: props(map[string]any{}), Handler: t.handler},
+		{Name: "read_file", Description: "读取源码文件并取得不可变证据 ID", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
+		{Name: "list_files", Description: "列出工作区文件；path 可设为 .", Parameters: props(map[string]any{"path": str()}), Handler: t.handler},
+		{Name: "search", Description: "搜索源码文本并取得证据 ID", Parameters: props(map[string]any{"query": str()}), Handler: t.handler},
+		{Name: "write_file", Description: "写入分配范围内的源码；审查者只能在 review_tests/ 下添加补充测试", Parameters: props(map[string]any{"path": str(), "content": str()}), Handler: t.handler},
+		{Name: "run", Description: "在隔离、无凭据、无网络的容器中执行。优先直接传参数数组，不经 shell；确需 shell 时使用 sh -ceu '命令'，不要使用 sh -lc（login shell 会重置 PATH）。每次 run 都启动新的临时容器，/tmp 不跨 run 保留；临时脚本须在同一次 run 内创建并执行。只有获授权的工作区路径在不同 run 间持久。返回受信退出状态与日志证据。", Parameters: props(map[string]any{"args": array(str()), "timeout_seconds": map[string]any{"type": "integer"}}), Handler: t.handler},
 	}
 	if len(t.readableEvidence) > 0 {
-		tools = append(tools, agent.Tool{Name: "read_evidence", Description: "Read a redacted JSON-text preview of an assigned, hash-verified evidence ID from accepted peer reports. The response marks truncated previews; use a focused source read or command when content is omitted. Controller file paths are inaccessible through read_file. Cite the returned original evidence_id; reading creates no new independent proof. This grants no arbitrary file access.", Parameters: props(map[string]any{"evidence_id": str()}), Handler: t.handler})
+		tools = append(tools, agent.Tool{Name: "read_evidence", Description: "读取已接受同伴报告中分配给你的证据 ID，返回通过哈希校验并脱敏的 JSON 文本预览。预览截断会明确标记；内容不全时请针对性读取源码或执行命令。read_file 不能访问控制器文件路径。引用返回的原始 evidence_id；读取行为不会产生新的独立证明，也不授予任意文件访问权。", Parameters: props(map[string]any{"evidence_id": str()}), Handler: t.handler})
 	}
 	if t.baseFiles != nil {
-		tools = append(tools, agent.Tool{Name: "read_base_file", Description: "Read a file at the fixed target branch base snapshot", Parameters: props(map[string]any{"path": str()}), Handler: t.handler}, agent.Tool{Name: "candidate_diff", Description: "Read independently computed base-to-candidate source changes", Parameters: props(map[string]any{}), Handler: t.handler})
+		tools = append(tools, agent.Tool{Name: "read_base_file", Description: "读取固定目标分支基线快照中的文件", Parameters: props(map[string]any{"path": str()}), Handler: t.handler}, agent.Tool{Name: "candidate_diff", Description: "读取控制器独立计算的基线到候选源码差异", Parameters: props(map[string]any{}), Handler: t.handler})
+	}
+	for i := range tools {
+		if description, ok := agent.ChineseToolDescription(tools[i].Name); ok {
+			tools[i].Description = description
+		}
 	}
 	return tools
 }
@@ -246,7 +386,7 @@ func (e *Engine) candidateDiff(ctx context.Context, w domain.Workflow, base map[
 	var err error
 	if snapshotSHA != "" {
 		if snapshotSHA != w.TestedSHA {
-			return nil, errors.New("review source identity differs from the verified snapshot")
+			return nil, errors.New("审查源码身份与已验证快照不一致")
 		}
 		head, err = e.reviewSnapshot(ctx, w)
 	} else {
@@ -272,7 +412,13 @@ func (e *Engine) candidateDiff(ctx context.Context, w domain.Workflow, base map[
 	for p := range names {
 		a, aok := base[p]
 		b, bok := head[p]
-		if aok == bok && domain.Digest(a.Data) == domain.Digest(b.Data) && a.Mode == b.Mode {
+		modeUnchanged := !aok
+		if aok && bok {
+			aMode, aErr := sandbox.NormalizeGitFileMode(a.Mode)
+			bMode, bErr := sandbox.NormalizeGitFileMode(b.Mode)
+			modeUnchanged = aErr == nil && bErr == nil && aMode == bMode
+		}
+		if aok == bok && domain.Digest(a.Data) == domain.Digest(b.Data) && modeUnchanged {
 			continue
 		}
 		changes = append(changes, map[string]any{"path": p, "deleted": !bok, "added": !aok, "base": e.redact(string(a.Data)), "candidate": e.redact(string(b.Data))})
@@ -286,7 +432,7 @@ func encodeToolOutput(value any, priorErr error) (string, error) {
 	}
 	b, err := json.Marshal(value)
 	if err != nil {
-		return "", fmt.Errorf("encode tool output: %w", err)
+		return "", fmt.Errorf("编码工具输出失败：%w", err)
 	}
 	return string(b), nil
 }
