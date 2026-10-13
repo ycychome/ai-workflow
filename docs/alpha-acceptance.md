@@ -1,13 +1,13 @@
 # Alpha 集中验收记录
 
-状态：**PR #3 远端 CI 已通过；个人仓库上的真实集成探针 BLOCKED，诊断与修复仍未完成；完整 Alpha 尚未放行**。旧 pilot 不在本轮操作范围内。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
+状态：**已验证提交的远端 CI 通过，最新修复完整 CI 复跑中；探针 001 失败保留，探针 002 已完成可信 CI 签发并进入独立审查；完整 Alpha 尚未放行**。旧 pilot 不在本轮操作范围内。以下历史结果来自 `codex/dynamic-agents-alpha` 实施分支，不复用历史 MVP 验收。
 
 ## 当前接续状态（2026-10-13）
 
 - **目标身份：** 私有 `zymooll/ai-workflow-alpha-test`，repository ID `1416790756`；GitHub App ID `5285791` 的个人 installation `170932429`，范围为 `only selected repositories` 且仅选中该仓库。此前的组织仓库 `ycychome/test-repo-for-ai-test`（ID `1415305337`）是历史目标。旧 `ycychome/ai-workflow-pilot` 的维护与重置边界未改变。
-- **PR #3 CI：** head `436730ad...` 对应 run `38395066796` 的两个 job 均成功。摘要 [`../acceptance-evidence/ci-run-38395066796-summary.json`](../acceptance-evidence/ci-run-38395066796-summary.json) 显示 unit 357 passed／139 层隔离 skips，PostgreSQL 428／18，Docker 448／0；T01–T28 全部通过，`uncovered_skips` 为空。原始日志 SHA-256 为 `3ba02b31ad6f70babc484768f2e80c6893de947f10eb137eaa3956ada0ab651a`。GitHub artifact 仍因存储配额上传失败，因此不能将其描述为证据 artifact 已上传。
+- **PR #3 CI：** head `436730ad...` 对应 run `38395066796` 的两个 job 均成功。工作树上级的 `acceptance-evidence/ci-run-38395066796-summary.json` 显示 unit 357 passed／139 层隔离 skips，PostgreSQL 428／18，Docker 448／0；T01–T28 全部通过，`uncovered_skips` 为空。原始日志 SHA-256 为 `3ba02b31ad6f70babc484768f2e80c6893de947f10eb137eaa3956ada0ab651a`。GitHub artifact 仍因存储配额上传失败，因此不能将其描述为证据 artifact 已上传。
 - **真实探针：** `connection-T01-001` 当前关联个人测试仓库 PR #2，generation 2，累计 Issue 调用 191/200；当日累计 270/500（包含此前 79 次），并未因新库或恢复清零。工作流 BLOCKED：最后一个工具调用时剩余 20 次额度，因此尝试耗尽。Verifier 已发现候选测试 DSN 配置错误及 gofmt 问题，集成尚未修复；`testedSHA` 与 `testedTree` 均为 null。该探针不属于正式冒烟，当前没有 signed receipt、Judge 或完整 gate 证据，不能记为 PASS。
-- **尚待的运行环境工作：** Cloudflare 隧道 7844/TCP 与 7844/UDP 不可用；GitHub App 原 webhook hook 未修改。root 正在修复 runner 登录 shell 的 PATH 与 `/tmp` 说明，之后会启动独立新 probe；当前 BLOCKED 记录须保留为历史失败，不覆写。
+- **运行环境与新探针：** 网络重试后 QUIC 公网隧道恢复，App Webhook 已备份更新；真实投递和同 GUID 去重已核验。运行器 PATH／临时目录说明修复通过真实 Docker 回归。新探针 `connection-T01-002` 对应 PR #5，固定合并提交验证和真实 CI 签发成功，独立审查尚未完成；旧 BLOCKED 探针保留。
 - **正式放行仍待：** 十项 smoke、90 项 ABC 对照、20 项 blind review、人类 labels 校核及维护者 merge 均未完成。
 
 远端 CI 通过只证明该 PR 的 CI 矩阵结果，不替代真实模型闭环、候选集成、签名回执、Judge 或人工验收。
@@ -105,3 +105,7 @@
 已在原验收数据库启动新的 `connection-T01-002`，Issue #3，初始独立缺陷提交 `625e658cc201a8840933df799a8a2b9a4551c0ce`；该探针同样不计正式冒烟。启动前每日累计仍为 270 次，保留探针 001 的 191 次与先前 79 次，不提高或重置额度。新有效配置摘要 `e8710dd3e8a2565253093197085366d442ab43b9c59f94397ea66e5c2d935383`，runner 固定到镜像内容 ID；正式 90 项矩阵已按实际 API 配置重新冻结，120 项独立 Git 快照准备进行中，正式模型评估尚未运行。
 
 固定审查 PR 的 opened CI 可能早于评估 workflow 创建时间，因此管理员固定可信 CI 增加专用 `aiwf-ci-refresh` 标签触发，仅该标签可触发额外运行。宿主协调器对缺少符合时间边界 run 的精确 WAITING_CI 候选持久化一次性刷新预留，重读 PR 和候选后添加标签；仍保留完整签名、NotBefore、head/base／tree 和工作流来源校验。当前固定来源提交 `00d15a990e462cec464c89bdca15333554138d25`、blob `98365815d31fac129be799426ef3bd14c137b870`，该接线仍待实际签发与最终门禁结果证明。
+
+真实探针 002 已取得固定 test-merge `71190131317bfddc8a72d4be1dd1e127b3813b29`、树 `3ec1e8ce79dd903a792d03c7b457690422223c45`。宿主 `ci-receipt` 对 Actions run `38406324523` attempt 1 独立测试、确认停止并签发成功，receipt digest `10ba35713ab2d5ce4a2d7c7c5d13afdd0bbfa604ee68aaa7cb4f73a83584d18b`；控制器实际进入 REVIEWING，未以 CLI 退出码代替最终审查或 Judge。
+
+真实证据导出发现 JSON 摘要表示不一致：存储文件为缩进 JSON，而 Evidence.Hash 绑定紧凑 JSON；API 旧实现错误地比较原文件字节。现改为保留原顺序、数值和转义的 `json.Compact` 后严格校验并返回紧凑字节，不改变历史摘要。回归覆盖大整数、中文／转义、篡改、路径和 symlink 越界。此传输修复通过 Go 单元／vet，运行器将在当前 Agent 停稳后更新，再进行真实证据 GET 与摘要核验。

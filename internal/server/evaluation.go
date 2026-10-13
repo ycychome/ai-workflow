@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +20,13 @@ import (
 )
 
 var evaluationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$`)
+
+var (
+	errEvaluationEvidencePath        = errors.New("评估证据路径越界")
+	errEvaluationEvidenceUnavailable = errors.New("评估证据文件不可用")
+	errEvaluationEvidenceLimit       = errors.New("评估证据超出传输限制")
+	errEvaluationEvidenceDigest      = errors.New("评估证据摘要校验失败")
+)
 
 // evaluationSnapshot is an operator-installed receipt, never supplied by an Issue
 // or a model. The preparation adapter must hash the complete candidate source.
@@ -59,6 +68,55 @@ func readEvaluationJSON(path string, target any) ([]byte, error) {
 	e = json.Unmarshal(b, target)
 	return b, e
 }
+
+// readEvaluationEvidence returns the compact JSON representation whose digest
+// is stored in Evidence.Hash. MarshalIndent is used when evidence is saved, so
+// hashing its raw pretty-printed file bytes would not match that digest. Compact
+// preserves key order, number spelling, and JSON escapes without decoding and
+// re-marshaling values through floating point.
+func readEvaluationEvidence(dataDir, workflowID string, ev domain.Evidence) ([]byte, error) {
+	root, err := filepath.EvalSymlinks(filepath.Join(dataDir, "evidence", workflowID))
+	if err != nil {
+		return nil, errEvaluationEvidenceUnavailable
+	}
+	target, err := filepath.EvalSymlinks(ev.Path)
+	if err != nil {
+		return nil, errEvaluationEvidenceUnavailable
+	}
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return nil, errEvaluationEvidencePath
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		return nil, errEvaluationEvidenceUnavailable
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errEvaluationEvidenceUnavailable
+	}
+	const limit = 32 << 20
+	if info.Size() > limit {
+		return nil, errEvaluationEvidenceLimit
+	}
+	body, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, errEvaluationEvidenceUnavailable
+	}
+	if len(body) > limit {
+		return nil, errEvaluationEvidenceLimit
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, body); err != nil {
+		return nil, errEvaluationEvidenceDigest
+	}
+	if sha256Text(compact.Bytes()) != ev.Hash {
+		return nil, errEvaluationEvidenceDigest
+	}
+	return compact.Bytes(), nil
+}
+
 func (h *Handlers) evaluationAPI(w http.ResponseWriter, r *http.Request) {
 	effective, configErr := h.engine.ExecutionConfig(r.Context())
 	if configErr != nil {
@@ -127,28 +185,20 @@ func (h *Handlers) evaluationAPI(w http.ResponseWriter, r *http.Request) {
 			if ev.ID != evidenceID {
 				continue
 			}
-			base, e := filepath.Abs(filepath.Join(h.engine.Config().DataDir, "evidence", wf.ID))
-			if e != nil {
-				writeError(w, 500, e.Error())
-				return
-			}
-			path, e := filepath.EvalSymlinks(ev.Path)
-			if e != nil {
-				writeError(w, 404, "证据文件不可用")
-				return
-			}
-			path, e = filepath.Abs(path)
-			if e != nil || !strings.HasPrefix(path, base+string(filepath.Separator)) {
+			data, e := readEvaluationEvidence(h.engine.Config().DataDir, wf.ID, ev)
+			if errors.Is(e, errEvaluationEvidencePath) {
 				writeError(w, 403, "证据路径越界")
 				return
 			}
-			info, e := os.Stat(path)
-			if e != nil || info.Size() > 32<<20 {
+			if errors.Is(e, errEvaluationEvidenceUnavailable) {
+				writeError(w, 404, "证据文件不可用")
+				return
+			}
+			if errors.Is(e, errEvaluationEvidenceLimit) {
 				writeError(w, 409, "证据文件不可用或超出传输限制")
 				return
 			}
-			data, e := os.ReadFile(path)
-			if e != nil || sha256Text(data) != ev.Hash {
+			if e != nil {
 				writeError(w, 409, "证据摘要校验失败")
 				return
 			}
