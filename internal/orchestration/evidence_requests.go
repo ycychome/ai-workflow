@@ -87,11 +87,8 @@ func (e *Engine) RequestEvidence(ctx context.Context, workflowID, key, requester
 	if err != nil {
 		return result, err
 	}
-	if targetRole != "verifier" && targetRole != "reviewer" {
-		return result, errors.New("补充证据只能交由 verifier 或 reviewer 执行")
-	}
-	if strings.TrimSpace(question) == "" {
-		return result, errors.New("补充证据请求必须说明具体问题")
+	if err := validateEvidenceProposalFields(evidenceProposal{Role: targetRole, Question: question, FindingID: findingID}); err != nil {
+		return result, err
 	}
 	id := "ER-" + domain.Digest([]string{w.ID, key, requesterRunID, targetRole, question, findingID})[:24]
 	err = e.Store.UpdateCoordination(store.WithCoordinationRun(store.WithExpectedState(ctx, w.Generation, w.HeadSHA), run), w.ID, "evidence_request_created", func(x *domain.Workflow) (any, error) {

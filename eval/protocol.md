@@ -1,6 +1,6 @@
 # 冻结工单评估协议
 
-评估版本为 `issuedesk-alpha-v4-budget-aware`。同一个正确服务基线分别施加十种确定性变体，形成十道独立开发任务；每道任务重新建目录和独立 PostgreSQL 服务，不依赖其他题目的修改或数据。对应十对缺陷/修复候选可用于 Reviewer 独立判断，修复候选为同一冻结正确基线。所有标签初始 `human_review=pending`，正式报告必须由人工核准，不能把生成标签声称为已确认真值。
+评估版本为 `issuedesk-alpha-v5-report-feedback`。同一个正确服务基线分别施加十种确定性变体，形成十道独立开发任务；每道任务重新建目录和独立 PostgreSQL 服务，不依赖其他题目的修改或数据。对应十对缺陷/修复候选可用于 Reviewer 独立判断，修复候选为同一冻结正确基线。所有标签初始 `human_review=pending`，正式报告必须由人工核准，不能把生成标签声称为已确认真值。
 
 ## 实验分组
 
@@ -10,11 +10,11 @@
 
 每组每题重复三次，共九十次开发运行。模型配置、代码快照、题面、可用工具与每题总预算保持一致；不能给 C 每个 Agent 各一份完整预算。随机种子、模型供应方/版本、开始时间和实际调用量均由运行器留证。任务顺序应在运行器中按记录的随机种子打乱；本 CLI 输出的是稳定逻辑矩阵，不冒充已经随机执行。
 
-`matrix --execution-config` 接收运行器导出的**有效非敏感配置 JSON**：`model_profile`，`budget` 中的 `issue_calls/daily_calls/issue_minutes/max_attempts/max_fix_rounds/input_price_per_million/output_price_per_million`，`runner` 中的 `attempt_minutes/agent_concurrency/workflow_agent_concurrency/max_tasks_per_workflow/max_evidence_requests/max_tool_calls_per_run`。这些字段都必须显式提供，不从 example 配置猜预算。`max_fix_rounds=0` 是有效配置，表示不允许自动修复轮，仍允许完成同预算评估。价格为零表示未知，成本输出 null。有效预算硬限仍由运行器执行；离线汇总只检测已记录的调用量、墙钟量超限，不冒充调用前拦截。
+`matrix --execution-config` 接收运行器导出的**有效非敏感配置 JSON**：`model_profile`，`budget` 中的 `issue_calls/daily_calls/issue_minutes/max_attempts/max_fix_rounds/input_price_per_million/output_price_per_million`，`runner` 中的 `attempt_minutes/agent_concurrency/workflow_agent_concurrency/max_tasks_per_workflow/max_evidence_requests/max_tool_calls_per_run`。这些字段都必须显式提供，不从 example 配置猜预算。`max_fix_rounds=0` 是有效配置，表示不允许自动修复轮，仍允许完成同预算评估。价格为零表示未知，成本输出 null。有效预算硬限仍由运行器执行；离线汇总只检测已记录的调用量、累计执行时间超限，不冒充调用前拦截。
 
 `issue_calls` 与 `daily_calls` 限制实际模型 HTTP 请求尝试，包含传输重试，跨所有 Agent 共享；`max_tool_calls_per_run=200` 单独限制每次 Agent run 的普通工具调用尝试，包含被拒绝的未知工具批次。`max_calls` 与 `max_requests` 分别向模型呈现这两个轴。未知工具不会执行；修正反馈继续消耗原有 HTTP 请求额度，耗尽时停止。
 
-v3 更新工具与 HTTP 的独立计数合同；v4 继续保留全部义务与独立审查，只调整预算规划、明确既定验证命令，并为独立复验增加批次身份。v2 的失败探针和原始判定包保留；服务基线、题面、确定性变体、候选标签、隐藏 driver／harness 与真值断言保持原 SHA-256，不以协议更新覆盖失败记录。
+v3 更新工具与 HTTP 的独立计数合同；v4 继续保留全部义务与独立审查，只调整预算规划、明确既定验证命令，并为独立复验增加批次身份。v5 将补证请求的字段与发现引用校验提前到报告接受前，并向审查规划者提供当前有效 ID 摘要；未知或过期引用在原请求预算内获得纠错反馈，事务内身份检查仍保留。v2 的失败探针和 v3／v4 的原始判定包、失败回执保留；服务基线、题面、确定性变体、候选标签、隐藏 driver／harness 与真值断言保持原 SHA-256，不以协议更新覆盖失败记录。
 
 ## 准备与隔离
 
@@ -49,3 +49,5 @@ Agent 结束后，评估器先固定候选 commit、父提交和真实 Git 树�
 准备器和 plan 支持 `--experiment-id`，将 1–24 位 ASCII 批次名加入每个 trial_id；省略时保留旧 ID。开发结果同时记录不可变 trial_id 和矩阵逻辑 run_key，不能将不同批次的同逻辑运行混为一条结果。准备、恢复、证据与检查点显式绑定批次；改变实现／执行配置须新建批次，保留旧失败，不修改旧 trial、Issue、PR、判定或用量。
 
 预算规划将同一修改范围内的实现与测试合并，Planner 明确读取控制器实际验证配置；全量 mandatory obligations、独立 Reviewer 首轮隔离、Skeptic、可信 CI 和外部 Judge 继续执行。运行器配置显式映射专用数据库环境变量，实际执行数据库公开测试，不能用数据库测试 skip 宣称已覆盖。
+
+累计执行时间使用已启动 Agent 活跃区间的并集，加控制器独立执行计费；排队和已确认停止后的人工等待不计入 Issue 执行时间预算。端到端 elapsed 从本地 workflow.created_at 到最终更新另行留证，不能把 runtime_seconds 宣称为端到端硬限或 GitHub Issue 原始创建时长。

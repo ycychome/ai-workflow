@@ -51,6 +51,19 @@ func validateReviewPlanReport(output json.RawMessage) error {
 	return nil
 }
 
+func validateReviewPlanReportForWorkflow(output json.RawMessage, w domain.Workflow) error {
+	if err := validateReviewPlanReport(output); err != nil {
+		return err
+	}
+	var candidate struct {
+		Requests []evidenceProposal `json:"evidence_requests"`
+	}
+	if err := json.Unmarshal(output, &candidate); err != nil {
+		return fmt.Errorf("解析审查补充证据请求失败：%w", err)
+	}
+	return validateEvidenceProposals(w, candidate.Requests)
+}
+
 func developmentPlannerInput(w domain.Workflow, verificationCommands [][]string, verificationServices []string, remainingTasks int) map[string]any {
 	return map[string]any{
 		"spec": w.Spec, "expected_revision": w.PlanRevision, "current_tasks": w.Tasks,
@@ -825,7 +838,9 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 			if err != nil {
 				return err
 			}
-			output, askErr := session.ask(string(raw(map[string]any{"spec": w.Spec, "mandatory_obligations": baseline, "head_sha": w.HeadSHA, "tested_commit_sha": w.TestedSHA, "tested_tree_sha": w.TestedTreeSHA})), session.readTools(), reviewPlanSchema(), validateReviewPlanReport)
+			validatePlan := func(output json.RawMessage) error { return validateReviewPlanReportForWorkflow(output, *w) }
+			plannerInput := map[string]any{"spec": w.Spec, "mandatory_obligations": baseline, "head_sha": w.HeadSHA, "tested_commit_sha": w.TestedSHA, "tested_tree_sha": w.TestedTreeSHA, "evidence_request_findings": evidenceFindingOptions(*w)}
+			output, askErr := session.ask(string(raw(plannerInput)), session.readTools(), reviewPlanSchema(), validatePlan)
 			// The planner result is fenced and recorded before stopping its run.
 			if askErr == nil {
 				askErr = e.Store.AttemptOwned(session.ctx, session.execution.run.ID, w.ID, "review-plan", w.Generation, session.execution.run.LeaseEpoch, w.LeaseOwner, "OUTPUT_READY", output, session.listEvidence())
@@ -843,7 +858,7 @@ func (e *Engine) review(ctx context.Context, w *domain.Workflow) error {
 			if err = json.Unmarshal(output, &plan); err != nil {
 				return err
 			}
-			if err = validateReviewPlanReport(output); err != nil {
+			if err = validatePlan(output); err != nil {
 				return err
 			}
 			requests = plan.Requests
@@ -1246,6 +1261,9 @@ func (e *Engine) reviewTask(ctx context.Context, w domain.Workflow, task domain.
 				return err
 			}
 			err := mergeReportWithMechanical(&preview, candidate, task.ObligationIDs, session.listEvidence(), skeptic, mechanical)
+			if err == nil && skeptic {
+				err = validateEvidenceProposals(preview, candidate.EvidenceRequests)
+			}
 			if err != nil {
 				e.Store.Audit(context.WithoutCancel(ctx), w.ID, "report_rejected", map[string]any{"generation": w.Generation, "task_id": task.ID, "error": e.redact(err.Error())})
 			}

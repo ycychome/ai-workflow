@@ -36,8 +36,8 @@ func TestRoleCatalogAndRenderedBoundaries(t *testing.T) {
 }
 
 func TestPromptVersionAndBudgetEfficiencyBoundaries(t *testing.T) {
-	if PromptVersion != "zh-CN/v4" {
-		t.Fatalf("PromptVersion=%q, want zh-CN/v4", PromptVersion)
+	if PromptVersion != "zh-CN/v5" {
+		t.Fatalf("PromptVersion=%q, want zh-CN/v5", PromptVersion)
 	}
 	checks := []struct {
 		role RoleID
